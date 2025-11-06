@@ -3,20 +3,20 @@ from .play import play
 from .train import train
 from .interface import TestInterface, CompetitionInterface
 
-if sys.argv[1] == "play":
-    ### do stuff
+def main():
+    if len(sys.argv) < 2:
+        raise ValueError("Usage: python -m hybrid_bot [play|train|test] [w|b]")
+    cmd = sys.argv[1]
+    if cmd == "play":
+        color = sys.argv[2] if len(sys.argv) > 2 else "w"
+        play(CompetitionInterface(), color=color)
+    elif cmd == "train":
+        train()
+    elif cmd == "test":
+        color = sys.argv[2] if len(sys.argv) > 2 else "w"
+        play(TestInterface(), color=color)
+    else:
+        raise ValueError("Invalid argument received - 'play' or 'train' expected")
 
-    play(CompetitionInterface(), color = sys.argv[2])
-
-elif sys.argv[1] == "train":
-    ### do stuff
-
-    train()
-
-elif sys.argv[1] == "test":
-
-    play(TestInterface(), color = sys.argv[2])
-
-else:
-
-    raise ValueError("Invalid argument recieved - 'play' or 'train' expected")
+if __name__ == "__main__":
+    main()
