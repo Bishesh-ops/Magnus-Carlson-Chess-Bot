@@ -821,6 +821,9 @@ class HybridEngine:
             return min_eval
     
     def find_best_move(self, board: chess.Board, time_limit: Optional[float] = None) -> chess.Move:
+        # CRITICAL: Make a copy of the board to avoid any state corruption
+        board = board.copy()
+        
         # Check opening book first
         if self.opening_book and board.fullmove_number <= 15:
             opening_move = self.opening_book.get_opening_move(board)
@@ -874,7 +877,8 @@ class HybridEngine:
             # Seed with previous PV move at root if available
             if self.pv_line:
                 pv_root = self.pv_line[0]
-                if pv_root in ordered_moves:
+                # CRITICAL: Verify PV move is legal in current position before using it
+                if pv_root in legal_moves and pv_root in ordered_moves:
                     try:
                         ordered_moves.remove(pv_root)
                         ordered_moves.insert(0, pv_root)
@@ -919,11 +923,27 @@ class HybridEngine:
                     break
             
             if depth_best_move:
-                best_move = depth_best_move
-                prev_best = best_value
+                # CRITICAL: Verify depth_best_move is still legal before accepting it
+                if depth_best_move in board.legal_moves:
+                    best_move = depth_best_move
+                    prev_best = best_value
+                else:
+                    # This should never happen, but if it does, log and skip
+                    import sys
+                    print(f"WARNING: depth_best_move {depth_best_move} not legal at depth {current_depth}", file=sys.stderr)
             
             if self.verbose:
-                print(f"Depth {current_depth}: best_move={board.san(best_move) if best_move else 'None'}, "
+                move_str = 'None'
+                if best_move:
+                    try:
+                        # Only convert to SAN if move is legal
+                        if best_move in board.legal_moves:
+                            move_str = board.san(best_move)
+                        else:
+                            move_str = f"ILLEGAL({best_move})"
+                    except:
+                        move_str = f"ERROR({best_move})"
+                print(f"Depth {current_depth}: best_move={move_str}, "
                       f"eval={best_value:.2f}, nodes={self.nodes_searched}, time={elapsed:.2f}s")
             
             # If we've found a mate, no need to search deeper
