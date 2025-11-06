@@ -137,10 +137,25 @@ class ChessGameDataset(Dataset):
                                     if white_title != "BOT" or black_title != "BOT":
                                         continue
 
-                                # Filter out non-standard variants (e.g., chess960/FRC)
+                                # Filter out non-standard variants (e.g., Chess960/FRC) and non-standard starting positions.
+                                # Many broadcast PGNs omit a Variant tag but include SetUp/FEN for Chess960; explicitly detect and skip.
                                 variant = (headers.get("Variant", headers.get("VariantName", "standard")) or "standard").lower()
-                                if variant not in ("standard", "normal", "chess"):
+                                event = (headers.get("Event", "") or "").lower()
+
+                                # Known non-standard variant keywords
+                                if any(k in variant for k in ("chess960", "fischer", "960", "crazyhouse", "atomic", "antichess", "horde")):
                                     continue
+                                if any(k in event for k in ("chess960", "fischer", "960")):
+                                    continue
+
+                                # Skip games with SetUp/FEN that do not match standard initial placement
+                                fen = headers.get("FEN", "") or ""
+                                setup = headers.get("SetUp", headers.get("Setup", "0")) or "0"
+                                if setup == "1" and fen:
+                                    start_rank = fen.split()[0]
+                                    if start_rank != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
+                                        # Likely Chess960 or other variant: skip to avoid illegal SAN (O-O/O-O-O) during parse
+                                        continue
                             except:
                                 continue
                             
@@ -182,8 +197,13 @@ class ChessGameDataset(Dataset):
                                     else:
                                         if board.turn == chess.BLACK:
                                             position_value = -position_value
-                                    self.positions.append(self.encoder.encode_board(board))
-                                    self.outcomes.append(position_value)
+                                    # Encode the current board position
+                                    try:
+                                        self.positions.append(self.encoder.encode_board(board))
+                                        self.outcomes.append(position_value)
+                                    except Exception:
+                                        # If board encoding fails for any reason, skip this position
+                                        pass
                                     if node.move:
                                         board.push(node.move)
                             except ValueError:
@@ -193,8 +213,13 @@ class ChessGameDataset(Dataset):
                             
                             games_loaded += 1
                             
-                        except Exception as e:
-                            # Skip problematic games
+                        except ValueError:
+                            # Parsing error while reading game (commonly due to Chess960 castling SAN)
+                            games_skipped_parse += 1
+                            continue
+                        except Exception:
+                            # Skip other problematic games silently
+                            games_skipped_parse += 1
                             continue
                     
         except Exception as e:
@@ -214,7 +239,7 @@ class ChessGameDataset(Dataset):
         return position, outcome
 
 
-def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=0, min_elo=1600):
+def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=0, min_elo=1600, source="standard"):
     print("=" * 80)
     print("HYBRID CHESS BOT - TRAINING THE NEURAL EVALUATOR")
     print("=" * 80)
@@ -236,8 +261,11 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=0, min_elo=1
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    # Download databases from Lichess (months 01..10)
-    base = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-{:02d}.pgn.zst"
+    # Choose dataset source: 'standard' rated games or 'broadcast'
+    if source == "broadcast":
+        base = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-{:02d}.pgn.zst"
+    else:
+        base = "https://database.lichess.org/standard/lichess_db_standard_rated_2025-{:02d}.pgn.zst"
     database_urls = [base.format(m) for m in range(1, 11)]
     print(f"\n📥 Downloading Lichess databases (2025-01..2025-10)...")
     for u in database_urls:
@@ -376,6 +404,7 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--max-games", type=int, default=0, help="0 or negative means unlimited")
     parser.add_argument("--min-elo", type=int, default=2000)
+    parser.add_argument("--source", type=str, default="standard", choices=["standard", "broadcast"], help="Data source: standard rated games or broadcast snapshots")
     args = parser.parse_args()
 
     mg = None if args.max_games <= 0 else args.max_games
@@ -386,4 +415,5 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         max_games=mg,
         min_elo=args.min_elo,
+        source=args.source,
     )
