@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from .neural_evaluator import NeuralEvaluator, BoardEncoder, CompactChessNet
+import argparse
 
 # Import zstandard for .zst decompression
 try:
@@ -368,10 +369,20 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
 
 
 if __name__ == "__main__":
-    # Default training for competition
+    parser = argparse.ArgumentParser(description="Train the Hybrid Chess Bot neural evaluator")
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--max-games", type=int, default=0, help="0 or negative means unlimited")
+    parser.add_argument("--min-elo", type=int, default=2000)
+    args = parser.parse_args()
+
+    mg = None if args.max_games <= 0 else args.max_games
+
     train(
-        epochs=15,
-        batch_size=256,
-        max_games=5000,  # Quality > quantity
-        min_elo=2000      # Master-level games only
+        epochs=args.epochs,
+        batch_size=args["batch-size"] if isinstance(args, dict) else args.batch_size,
+        learning_rate=args["learning-rate"] if isinstance(args, dict) else args.learning_rate,
+        max_games=mg,
+        min_elo=args["min-elo"] if isinstance(args, dict) else args.min_elo,
     )
