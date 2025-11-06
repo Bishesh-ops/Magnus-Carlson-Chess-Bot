@@ -3,6 +3,7 @@
 import chess
 import time
 import os
+import sys
 from .interface import Interface
 from .engine import HybridEngine
 
@@ -55,16 +56,33 @@ def play(interface: Interface, color="w"):
         start = time.time()
         try:
             move = engine.find_best_move(board, time_limit=time_per_move)
-            if move not in board.legal_moves:
-                raise ValueError("Engine produced illegal move")
-        except Exception:
-            # Fallback first legal move
-            ls = list(board.legal_moves)
-            if not ls:
+            
+            # CRITICAL: Verify move is legal before proceeding
+            if move is None or move not in board.legal_moves:
+                raise ValueError(f"Engine produced illegal or null move: {move}")
+            
+            # Convert to SAN BEFORE pushing to board (important!)
+            san = board.san(move)
+            
+            # Double-check: verify the SAN move is parseable and legal
+            try:
+                test_move = board.parse_san(san)
+                if test_move != move:
+                    raise ValueError(f"SAN conversion mismatch: {move} -> {san} -> {test_move}")
+            except Exception as e:
+                raise ValueError(f"Invalid SAN generated: {san} - {e}")
+            
+        except Exception as e:
+            # Fallback: pick first legal move
+            print(f"Engine error: {e}", file=sys.stderr)
+            legal_moves = list(board.legal_moves)
+            if not legal_moves:
+                print("No legal moves available - game over", file=sys.stderr)
                 break
-            move = ls[0]
+            move = legal_moves[0]
+            san = board.san(move)
 
-        san = board.san(move)
+        # Output the move and push to board
         interface.output(san)
         board.push(move)
         elapsed = time.time() - start

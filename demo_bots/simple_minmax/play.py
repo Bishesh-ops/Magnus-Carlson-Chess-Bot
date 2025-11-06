@@ -1,4 +1,5 @@
 import chess
+import sys
 from .interface import Interface
 
 
@@ -130,10 +131,24 @@ def play(interface: Interface, color = "w"):
         board.push_san(move)
 
     while True:
-        best_move = find_best_move(board, search_depth)
-        interface.output(board.san(best_move))
-        board.push(best_move)
+        try:
+            best_move = find_best_move(board, search_depth)
+            
+            # CRITICAL: Verify move is legal
+            if best_move is None or best_move not in board.legal_moves:
+                print(f"Error: Generated illegal move {best_move}", file=sys.stderr)
+                legal_moves = list(board.legal_moves)
+                if not legal_moves:
+                    break
+                best_move = legal_moves[0]
+            
+            # Convert to SAN before output
+            san = board.san(best_move)
+            interface.output(san)
+            board.push(best_move)
 
-        move = interface.input()
-        board.push_san(move)
-        # print(board)
+            move = interface.input()
+            board.push_san(move)
+        except Exception as e:
+            print(f"Error in minmax bot: {e}", file=sys.stderr)
+            break
