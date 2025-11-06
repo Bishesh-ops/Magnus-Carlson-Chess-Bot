@@ -1,7 +1,8 @@
 """
 Training script for the Hybrid Chess Bot
 
-This trains the neural evaluator on real chess games from the database.
+This trains the neural evaluator on real chess games from Lichess database.
+Downloads PGN.zst format and trains on high-quality games.
 """
 
 import os
@@ -9,7 +10,7 @@ import sys
 import chess
 import chess.pgn
 import io
-import pandas as pd
+import requests
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,81 +18,153 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from .neural_evaluator import NeuralEvaluator, BoardEncoder, CompactChessNet
 
+# Import zstandard for .zst decompression
+try:
+    import zstandard as zstd
+except ImportError:
+    print("Installing zstandard for PGN.zst support...")
+    os.system(f"{sys.executable} -m pip install zstandard")
+    import zstandard as zstd
+
 
 class ChessGameDataset(Dataset):
-    """Dataset of chess positions from real games"""
+    """Dataset of chess positions from PGN.zst files"""
     
-    def __init__(self, games_csv_path, max_games=None):
+    def __init__(self, pgn_zst_url=None, pgn_zst_path=None, max_games=5000, min_elo=2000):
         """
-        Load chess games and extract positions with outcomes.
+        Load chess games from PGN.zst and extract positions with outcomes.
         
         Args:
-            games_csv_path: Path to games.csv
-            max_games: Maximum number of games to load (None = all)
+            pgn_zst_url: URL to download PGN.zst file
+            pgn_zst_path: Local path to PGN.zst file (if already downloaded)
+            max_games: Maximum number of games to load
+            min_elo: Minimum Elo rating for players (quality filter)
         """
         self.positions = []
         self.outcomes = []
         self.encoder = BoardEncoder()
         
-        print(f"Loading games from {games_csv_path}...")
-        self._load_games(games_csv_path, max_games)
-        print(f"Loaded {len(self.positions)} positions from games")
-    
-    def _load_games(self, csv_path, max_games):
-        """Load games and extract positions"""
-        try:
-            df = pd.read_csv(csv_path, nrows=max_games)
-            
-            for idx, row in df.iterrows():
-                if idx % 100 == 0:
-                    print(f"Processing game {idx}/{len(df)}")
-                
-                # Get game outcome
-                winner = str(row.get('winner', 'draw')).strip().lower()
-                if winner == 'white':
-                    game_outcome = 1.0
-                elif winner == 'black':
-                    game_outcome = -1.0
-                else:
-                    game_outcome = 0.0
-                
-                # Parse moves
-                moves_str = row.get('moves', '')
-                if not isinstance(moves_str, str) or not moves_str:
-                    continue
-                
-                # Create board and play through game
-                board = chess.Board()
-                moves = moves_str.split()
-                
-                # Extract positions from the game
-                # Weight positions by their distance from the end (later positions more important)
-                num_moves = len(moves)
-                for move_num, move_san in enumerate(moves):
-                    try:
-                        move = board.parse_san(move_san)
-                        board.push(move)
-                        
-                        # Skip very early positions (opening theory)
-                        if move_num < 10:
-                            continue
-                        
-                        # Calculate position value based on outcome and whose turn
-                        # Adjust outcome based on whose perspective
-                        position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
-                        
-                        # Weight positions closer to the end more heavily
-                        weight = (move_num / num_moves) ** 2
-                        
-                        # Store position
-                        self.positions.append(self.encoder.encode_board(board))
-                        self.outcomes.append(position_value * 0.7 + position_value * weight * 0.3)
-                        
-                    except Exception as e:
-                        break
+        print(f"Loading games from PGN.zst...")
         
+        # Download if URL provided
+        if pgn_zst_url and not pgn_zst_path:
+            pgn_zst_path = self._download_database(pgn_zst_url)
+        
+        if pgn_zst_path and os.path.exists(pgn_zst_path):
+            self._load_games_from_pgn_zst(pgn_zst_path, max_games, min_elo)
+        else:
+            print(f"ERROR: No PGN.zst file found!")
+            
+        print(f"Loaded {len(self.positions)} positions from {max_games} games")
+    
+    def _download_database(self, url):
+        """Download PGN.zst database"""
+        filename = os.path.basename(url)
+        filepath = os.path.join(os.path.dirname(__file__), filename)
+        
+        if os.path.exists(filepath):
+            print(f"Database already downloaded: {filepath}")
+            return filepath
+        
+        print(f"Downloading {url}...")
+        print(f"This may take a few minutes...")
+        
+        response = requests.get(url, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(filepath, 'wb') as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        percent = (downloaded / total_size) * 100
+                        print(f"\rDownloading: {percent:.1f}%", end='', flush=True)
+        
+        print(f"\n✅ Downloaded to {filepath}")
+        return filepath
+    
+    def _load_games_from_pgn_zst(self, filepath, max_games, min_elo):
+        """Load games from compressed PGN.zst file"""
+        games_loaded = 0
+        games_processed = 0
+        
+        print(f"Decompressing and parsing PGN.zst...")
+        
+        try:
+            with open(filepath, 'rb') as compressed_file:
+                dctx = zstd.ZstdDecompressor()
+                with dctx.stream_reader(compressed_file) as reader:
+                    text_stream = io.TextIOWrapper(reader, encoding='utf-8')
+                    
+                    while games_loaded < max_games:
+                        try:
+                            game = chess.pgn.read_game(text_stream)
+                            if game is None:
+                                break
+                            
+                            games_processed += 1
+                            if games_processed % 1000 == 0:
+                                print(f"Processed {games_processed} games, loaded {games_loaded} quality games...")
+                            
+                            # Quality filter: Only use high-Elo games
+                            headers = game.headers
+                            try:
+                                white_elo = int(headers.get("WhiteElo", "0"))
+                                black_elo = int(headers.get("BlackElo", "0"))
+                                
+                                if white_elo < min_elo or black_elo < min_elo:
+                                    continue
+                            except:
+                                continue
+                            
+                            # Get game result
+                            result = headers.get("Result", "*")
+                            if result == "1-0":
+                                game_outcome = 1.0  # White won
+                            elif result == "0-1":
+                                game_outcome = -1.0  # Black won
+                            elif result == "1/2-1/2":
+                                game_outcome = 0.0  # Draw
+                            else:
+                                continue  # Skip unfinished games
+                            
+                            # Extract positions from the game
+                            board = game.board()
+                            move_count = 0
+                            
+                            for move in game.mainline_moves():
+                                move_count += 1
+                                board.push(move)
+                                
+                                # Skip opening moves (use opening book for those)
+                                if move_count <= 10:
+                                    continue
+                                
+                                # Skip endgames with few pieces (different dynamics)
+                                if len(board.piece_map()) < 10:
+                                    continue
+                                
+                                # Calculate position value based on outcome
+                                position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
+                                
+                                # Weight by game progress
+                                weight = min(move_count / 40.0, 1.0)
+                                weighted_value = position_value * (0.3 + 0.7 * weight)
+                                
+                                # Store position
+                                self.positions.append(self.encoder.encode_board(board))
+                                self.outcomes.append(weighted_value)
+                            
+                            games_loaded += 1
+                            
+                        except Exception as e:
+                            # Skip problematic games
+                            continue
+                    
         except Exception as e:
-            print(f"Error loading games: {e}")
+            print(f"\nError loading PGN.zst: {e}")
             import traceback
             traceback.print_exc()
     
@@ -104,15 +177,20 @@ class ChessGameDataset(Dataset):
         return position, outcome
 
 
-def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
+def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_elo=2000):
     """
-    Train the neural evaluator.
+    Train the neural evaluator on high-quality Lichess games.
+    
+    Optimized for competition hardware (RTX 3090):
+    - Target: 40-45 minutes on RTX 3090
+    - Estimate: 2-3 hours on T4 GPU (Colab)
     
     Args:
-        epochs: Number of training epochs
-        batch_size: Batch size for training
+        epochs: Number of training epochs (15 recommended)
+        batch_size: Batch size for training (256 for GPU)
         learning_rate: Learning rate for optimizer
-        max_games: Maximum games to load from database
+        max_games: Maximum games to load (5000 = ~200k positions)
+        min_elo: Minimum player Elo (2000+ for quality)
     """
     print("=" * 80)
     print("HYBRID CHESS BOT - TRAINING THE NEURAL EVALUATOR")
@@ -125,25 +203,31 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
     except ImportError:
         print("\nWARNING: PyTorch not installed. Skipping neural network training.")
         print("The bot will use material evaluation as fallback.")
-        print("To train the neural network, install: pip install torch numpy pandas")
+        print("To train the neural network, install: pip install torch numpy zstandard")
         return
     
     # Determine device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nUsing device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    # Find games database
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    games_path = os.path.join(base_dir, "shared_resources", "games.csv")
+    # Download database from Lichess
+    database_url = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-10.pgn.zst"
     
-    if not os.path.exists(games_path):
-        print(f"\nWARNING: Games database not found at {games_path}")
-        print("Neural network training skipped. Bot will use material evaluation.")
-        return
+    print(f"\n📥 Downloading Lichess database...")
+    print(f"URL: {database_url}")
+    print(f"Quality filter: Players rated {min_elo}+ only")
+    print(f"Target games: {max_games}")
     
     # Load dataset
     try:
-        dataset = ChessGameDataset(games_path, max_games=max_games)
+        dataset = ChessGameDataset(
+            pgn_zst_url=database_url,
+            max_games=max_games,
+            min_elo=min_elo
+        )
         
         if len(dataset) == 0:
             print("No positions loaded. Training aborted.")
@@ -156,11 +240,12 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
             dataset, [train_size, val_size]
         )
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
         
         print(f"\nTraining set: {train_size} positions")
         print(f"Validation set: {val_size} positions")
+        print(f"Batch size: {batch_size}")
         
     except Exception as e:
         print(f"\nError loading dataset: {e}")
@@ -179,6 +264,8 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
     print("TRAINING")
     print("=" * 80)
     
+    import time
+    start_time = time.time()
     best_val_loss = float('inf')
     
     for epoch in range(epochs):
@@ -202,7 +289,9 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
             train_loss += loss.item()
             
             if batch_idx % 50 == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+                elapsed = time.time() - start_time
+                print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}/{len(train_loader)}, "
+                      f"Loss: {loss.item():.4f}, Time: {elapsed/60:.1f}min")
         
         train_loss /= len(train_loader)
         
@@ -220,10 +309,12 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
         
         val_loss /= len(val_loader)
         
+        elapsed = time.time() - start_time
         print(f"\nEpoch {epoch+1}/{epochs}")
         print(f"  Train Loss: {train_loss:.4f}")
         print(f"  Val Loss:   {val_loss:.4f}")
         print(f"  LR:         {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Time:       {elapsed/60:.1f} minutes")
         
         # Learning rate scheduling
         scheduler.step(val_loss)
@@ -237,11 +328,20 @@ def train(epochs=10, batch_size=64, learning_rate=0.001, max_games=1000):
         
         print()
     
+    total_time = time.time() - start_time
     print("=" * 80)
     print("TRAINING COMPLETE")
     print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Total time: {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
+    print(f"Estimated time on RTX 3090: ~{(total_time/60) * 0.4:.0f} minutes")
     print("=" * 80)
 
 
 if __name__ == "__main__":
-    train()
+    # Default training for competition
+    train(
+        epochs=15,
+        batch_size=256,
+        max_games=5000,  # Quality > quantity
+        min_elo=2000      # Master-level games only
+    )
