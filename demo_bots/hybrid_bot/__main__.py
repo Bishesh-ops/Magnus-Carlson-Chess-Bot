@@ -14,11 +14,11 @@ def main():
     elif cmd == "train":
         # Parse optional training args here to avoid requiring direct script call
         parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument("--epochs", type=int, default=20)
+        parser.add_argument("--epochs", type=int, default=12)
         parser.add_argument("--batch-size", type=int, default=256)
         parser.add_argument("--learning-rate", type=float, default=0.001)
-        parser.add_argument("--max-games", type=int, default=30000)
-        parser.add_argument("--min-elo", type=int, default=2000)
+        parser.add_argument("--max-games", type=int, default=20000)
+        parser.add_argument("--min-elo", type=int, default=2200)
         args, _ = parser.parse_known_args(sys.argv[2:])
         mg = None if args.max_games <= 0 else args.max_games
         train(
