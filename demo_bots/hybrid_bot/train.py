@@ -86,11 +86,13 @@ class ChessGameDataset(Dataset):
         return filepath
     
     def _load_games_from_pgn_zst(self, filepath, max_games, min_elo):
-        """Load games from compressed PGN.zst file"""
+        """Load games from compressed PGN.zst file with Stockfish evaluations"""
         games_loaded = 0
         games_processed = 0
+        bot_games_only = True  # Filter for bot-only games (higher quality)
         
         print(f"Decompressing and parsing PGN.zst...")
+        print(f"Filters: Bot-only={bot_games_only}, Min Elo={min_elo}")
         
         try:
             with open(filepath, 'rb') as compressed_file:
@@ -116,10 +118,17 @@ class ChessGameDataset(Dataset):
                                 
                                 if white_elo < min_elo or black_elo < min_elo:
                                     continue
+                                
+                                # Filter for bot-only games (higher quality for competition)
+                                if bot_games_only:
+                                    white_title = headers.get("WhiteTitle", "")
+                                    black_title = headers.get("BlackTitle", "")
+                                    if white_title != "BOT" or black_title != "BOT":
+                                        continue
                             except:
                                 continue
                             
-                            # Get game result
+                            # Get game result (fallback if no Stockfish evals)
                             result = headers.get("Result", "*")
                             if result == "1-0":
                                 game_outcome = 1.0  # White won
@@ -130,32 +139,61 @@ class ChessGameDataset(Dataset):
                             else:
                                 continue  # Skip unfinished games
                             
-                            # Extract positions from the game
+                            # Extract positions with Stockfish evaluations
                             board = game.board()
                             move_count = 0
                             
-                            for move in game.mainline_moves():
+                            for node in game.mainline():
                                 move_count += 1
-                                board.push(move)
                                 
                                 # Skip opening moves (use opening book for those)
                                 if move_count <= 10:
+                                    board.push(node.move) if node.move else None
                                     continue
                                 
                                 # Skip endgames with few pieces (different dynamics)
                                 if len(board.piece_map()) < 10:
+                                    board.push(node.move) if node.move else None
                                     continue
                                 
-                                # Calculate position value based on outcome
-                                position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
+                                # Try to extract Stockfish evaluation from comment
+                                position_value = None
+                                if node.comment:
+                                    # Parse [%eval X.XX] or [%eval #N]
+                                    import re
+                                    eval_match = re.search(r'\[%eval ([#\-\d.]+)\]', node.comment)
+                                    if eval_match:
+                                        eval_str = eval_match.group(1)
+                                        if eval_str.startswith('#'):
+                                            # Mate score: #3 = mate in 3
+                                            mate_moves = int(eval_str[1:])
+                                            position_value = 10.0 if mate_moves > 0 else -10.0
+                                        else:
+                                            # Centipawn evaluation: convert to normalized value
+                                            # Stockfish eval is from White's perspective
+                                            centipawns = float(eval_str)
+                                            # Normalize: tanh(cp/400) gives values in [-1, 1]
+                                            position_value = np.tanh(centipawns / 400.0)
                                 
-                                # Weight by game progress
-                                weight = min(move_count / 40.0, 1.0)
-                                weighted_value = position_value * (0.3 + 0.7 * weight)
+                                # Fallback to game outcome if no Stockfish eval
+                                if position_value is None:
+                                    position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
+                                    # Weight by game progress
+                                    weight = min(move_count / 40.0, 1.0)
+                                    position_value = position_value * (0.3 + 0.7 * weight)
+                                else:
+                                    # Stockfish eval is from White's perspective
+                                    # Adjust for current turn
+                                    if board.turn == chess.BLACK:
+                                        position_value = -position_value
                                 
                                 # Store position
                                 self.positions.append(self.encoder.encode_board(board))
-                                self.outcomes.append(weighted_value)
+                                self.outcomes.append(position_value)
+                                
+                                # Push the move
+                                if node.move:
+                                    board.push(node.move)
                             
                             games_loaded += 1
                             
