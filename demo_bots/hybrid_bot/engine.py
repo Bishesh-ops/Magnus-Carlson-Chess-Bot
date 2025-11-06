@@ -232,6 +232,23 @@ class HybridEngine:
             # Fallback: include full FEN to distinguish castling/ep/turn
             return board.fen()
     
+    def _pure_material_count(self, board: chess.Board) -> float:
+        """Pure material count without positional bonuses - ensures we value captures correctly"""
+        if board.is_checkmate():
+            return -999999 if board.turn == chess.WHITE else 999999
+        
+        if board.is_stalemate() or board.is_insufficient_material():
+            return 0
+        
+        score = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece:
+                value = PIECE_VALUES[piece.piece_type]
+                score += value if piece.color == chess.WHITE else -value
+        
+        return score / 100.0  # Normalize: Queen = 9.0, Pawn = 1.0
+    
     def _material_evaluation(self, board: chess.Board) -> float:
         if board.is_checkmate():
             return -999999 if board.turn == chess.WHITE else 999999
@@ -505,6 +522,8 @@ class HybridEngine:
             self.eval_cache[key] = 0.0
             return 0.0
         
+        # Get pure material advantage (without positional bonuses)
+        material_only = self._pure_material_count(board)
         classical = self._classical_eval(board)
         neural_val = None
         if self.use_neural and self.evaluator:
@@ -514,16 +533,20 @@ class HybridEngine:
                 neural_val = None
         phase = self._phase(board)
         if neural_val is not None:
-            # Blending strategy: more NN mid-game, more classical early & late
+            # Hybrid blending: Emphasize material more + neural for tactics
+            # Material gets 40% weight always to ensure we capture pieces
             if phase < 0.25:
-                alpha = 0.55
+                # Opening: 40% material, 35% neural, 25% classical
+                val = 0.40 * material_only + 0.35 * neural_val + 0.25 * classical
             elif phase < 0.65:
-                alpha = 0.75
+                # Middlegame: 40% material, 45% neural, 15% classical
+                val = 0.40 * material_only + 0.45 * neural_val + 0.15 * classical
             else:
-                alpha = 0.60
-            val = alpha * neural_val + (1 - alpha) * classical
+                # Endgame: 50% material, 30% neural, 20% classical
+                val = 0.50 * material_only + 0.30 * neural_val + 0.20 * classical
         else:
-            val = classical
+            # No neural net: emphasize material even more
+            val = 0.70 * material_only + 0.30 * classical
         self.eval_cache[key] = val
         return val
     
@@ -553,10 +576,14 @@ class HybridEngine:
                 captured = board.piece_at(move.to_square)
                 attacker = board.piece_at(move.from_square)
                 if captured and attacker:
-                    score += 10 * PIECE_VALUES[captured.piece_type] - PIECE_VALUES[attacker.piece_type]
+                    # HEAVILY prioritize capturing valuable pieces
+                    # Queen capture = 90k bonus, Rook = 50k, etc.
+                    capture_bonus = 100 * PIECE_VALUES[captured.piece_type]
+                    # Prefer capturing with less valuable pieces (MVV-LVA)
+                    score += capture_bonus - PIECE_VALUES[attacker.piece_type]
                 # Static Exchange Evaluation bonus/penalty
                 see_gain = self._see(board, move)
-                score += 1000 if see_gain > 0 else (-500 if see_gain < 0 else 0)
+                score += 2000 if see_gain > 0 else (-1000 if see_gain < 0 else 0)
             
             # Prioritize checks
             board.push(move)
