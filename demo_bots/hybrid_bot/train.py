@@ -222,7 +222,7 @@ class ChessGameDataset(Dataset):
         return position, outcome
 
 
-def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_elo=1600):
+def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=0, min_elo=1600):
     print("=" * 80)
     print("HYBRID CHESS BOT - TRAINING THE NEURAL EVALUATOR")
     print("=" * 80)
@@ -251,7 +251,8 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
     for u in database_urls:
         print(f" - {u}")
     print(f"Quality filter: Players rated {min_elo}+ only")
-    target_label = 'UNLIMITED' if (max_games is None or (isinstance(max_games, int) and max_games <= 0)) else str(max_games)
+    unlimited = (max_games is None) or (isinstance(max_games, int) and max_games <= 0)
+    target_label = 'UNLIMITED' if unlimited else str(max_games)
     print(f"Target games: {target_label}")
     
     # Load dataset
@@ -261,6 +262,8 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
             max_games=max_games,
             min_elo=min_elo
         )
+        if unlimited and len(dataset.positions) > 0 and len(dataset.outcomes) > 0 and len(dataset.positions) == len(dataset.outcomes):
+            print(f"Loaded {len(dataset)} total positions across {len(database_urls)} archives (unlimited mode)")
         
         if len(dataset) == 0:
             print("No positions loaded. Training aborted.")
