@@ -105,122 +105,171 @@ class ChessGameDataset(Dataset):
         print(f"Decompressing and parsing PGN.zst...")
         print(f"Filters: Bot-only={bot_games_only}, Min Elo={min_elo}")
         
+        def iter_pgn_blocks(text_stream):
+            """Yield complete PGN game blocks (headers + movetext) as strings without requiring seek()."""
+            buf = []
+            in_game = False
+            in_headers = False
+            for line in text_stream:
+                if line.startswith('['):
+                    # Start of headers or continuation
+                    if in_game and not in_headers:
+                        # New game starting -> yield the previous game
+                        yield ''.join(buf).strip() + "\n"
+                        buf = []
+                    in_headers = True
+                    in_game = True
+                    buf.append(line)
+                else:
+                    if in_headers and line.strip() == '':
+                        # End of header section
+                        buf.append(line)
+                        in_headers = False
+                    else:
+                        buf.append(line)
+            if buf:
+                yield ''.join(buf).strip() + "\n"
+
+        def parse_headers_from_block(block_text):
+            headers = {}
+            for l in block_text.splitlines():
+                l = l.strip()
+                if not l.startswith('['):
+                    break
+                try:
+                    key, rest = l[1:-1].split(' ', 1)
+                    value = rest.strip().strip('"')
+                    headers[key] = value
+                except Exception:
+                    continue
+            return headers
+
+        def is_standard_start(headers):
+            fen = headers.get("FEN", "") or ""
+            setup = headers.get("SetUp", headers.get("Setup", "0")) or "0"
+            if setup == "1" and fen:
+                start_rank = fen.split()[0]
+                return start_rank == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+            return True
+
+        def is_variant(headers):
+            variant = (headers.get("Variant", headers.get("VariantName", "standard")) or "standard").lower()
+            event = (headers.get("Event", "") or "").lower()
+            if any(k in variant for k in ("chess960", "fischer", "960", "crazyhouse", "atomic", "antichess", "horde")):
+                return True
+            if any(k in event for k in ("chess960", "fischer", "960")):
+                return True
+            return False
+
+        def maybe_mark_chess960(block_text, headers):
+            """If the FEN indicates a non-standard start but no variant tag, add a Variant "Chess960" header to enable castling parsing."""
+            if is_variant(headers):
+                return block_text
+            if not is_standard_start(headers):
+                lines = block_text.splitlines()
+                # Insert Variant line before the blank line terminating headers
+                for i, l in enumerate(lines):
+                    if l.strip() == '':
+                        lines.insert(i, '[Variant "Chess960"]')
+                        return "\n".join(lines) + "\n"
+                # If no explicit header terminator, append after last header
+                last_header_idx = 0
+                for i, l in enumerate(lines):
+                    if l.startswith('['):
+                        last_header_idx = i
+                lines.insert(last_header_idx + 1, '[Variant "Chess960"]')
+                return "\n".join(lines) + "\n"
+            return block_text
+
         try:
             with open(filepath, 'rb') as compressed_file:
                 dctx = zstd.ZstdDecompressor()
                 with dctx.stream_reader(compressed_file) as reader:
                     text_stream = io.TextIOWrapper(reader, encoding='utf-8')
                     
-                    while unlimited or (games_loaded < max_games):
+                    for block in iter_pgn_blocks(text_stream):
+                        if not (unlimited or (games_loaded < max_games)):
+                            break
+                        # Early header filtering
+                        headers = parse_headers_from_block(block)
+                        if not headers:
+                            continue
+                        games_processed += 1
+                        if games_processed % 1000 == 0:
+                            print(f"Processed {games_processed} games, loaded {games_loaded} quality games...")
+
                         try:
-                            game = chess.pgn.read_game(text_stream)
-                            if game is None:
-                                break
-                            
-                            games_processed += 1
-                            if games_processed % 1000 == 0:
-                                print(f"Processed {games_processed} games, loaded {games_loaded} quality games...")
-                            
-                            # Quality filter: Only use high-Elo games
-                            headers = game.headers
-                            try:
-                                white_elo = int(headers.get("WhiteElo", "0"))
-                                black_elo = int(headers.get("BlackElo", "0"))
-                                
-                                if white_elo < min_elo or black_elo < min_elo:
-                                    continue
-                                
-                                # Optional filter for bot-only games if requested
-                                if bot_games_only:
-                                    white_title = headers.get("WhiteTitle", "")
-                                    black_title = headers.get("BlackTitle", "")
-                                    if white_title != "BOT" or black_title != "BOT":
-                                        continue
-
-                                # Filter out non-standard variants (e.g., Chess960/FRC) and non-standard starting positions.
-                                # Many broadcast PGNs omit a Variant tag but include SetUp/FEN for Chess960; explicitly detect and skip.
-                                variant = (headers.get("Variant", headers.get("VariantName", "standard")) or "standard").lower()
-                                event = (headers.get("Event", "") or "").lower()
-
-                                # Known non-standard variant keywords
-                                if any(k in variant for k in ("chess960", "fischer", "960", "crazyhouse", "atomic", "antichess", "horde")):
-                                    continue
-                                if any(k in event for k in ("chess960", "fischer", "960")):
-                                    continue
-
-                                # Skip games with SetUp/FEN that do not match standard initial placement
-                                fen = headers.get("FEN", "") or ""
-                                setup = headers.get("SetUp", headers.get("Setup", "0")) or "0"
-                                if setup == "1" and fen:
-                                    start_rank = fen.split()[0]
-                                    if start_rank != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
-                                        # Likely Chess960 or other variant: skip to avoid illegal SAN (O-O/O-O-O) during parse
-                                        continue
-                            except:
+                            white_elo = int(headers.get("WhiteElo", "0"))
+                            black_elo = int(headers.get("BlackElo", "0"))
+                            if white_elo < min_elo or black_elo < min_elo:
                                 continue
-                            
-                            # Get game result (fallback if no Stockfish evals)
-                            result = headers.get("Result", "*")
-                            if result == "1-0":
-                                game_outcome = 1.0  # White won
-                            elif result == "0-1":
-                                game_outcome = -1.0  # Black won
-                            elif result == "1/2-1/2":
-                                game_outcome = 0.0  # Draw
-                            else:
-                                continue  # Skip unfinished games
-                            
-                            # Extract positions with Stockfish evaluations
-                            board = game.board()
-                            move_count = 0
-                            
-                            try:
-                                for node in game.mainline():
-                                    move_count += 1
-                                    # Try to extract Stockfish evaluation from comment
-                                    position_value = None
-                                    if node.comment:
-                                        import re
-                                        eval_match = re.search(r'\[%eval ([#\-\d.]+)\]', node.comment)
-                                        if eval_match:
-                                            eval_str = eval_match.group(1)
-                                            if eval_str.startswith('#'):
-                                                mate_moves = int(eval_str[1:])
-                                                position_value = 10.0 if mate_moves > 0 else -10.0
-                                            else:
-                                                centipawns = float(eval_str)
-                                                position_value = np.tanh(centipawns / 400.0)
-                                    if position_value is None:
-                                        position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
-                                        weight = min(move_count / 40.0, 1.0)
-                                        position_value = position_value * (0.3 + 0.7 * weight)
-                                    else:
-                                        if board.turn == chess.BLACK:
-                                            position_value = -position_value
-                                    # Encode the current board position
-                                    try:
-                                        self.positions.append(self.encoder.encode_board(board))
-                                        self.outcomes.append(position_value)
-                                    except Exception:
-                                        # If board encoding fails for any reason, skip this position
-                                        pass
-                                    if node.move:
-                                        board.push(node.move)
-                            except ValueError:
-                                # Illegal SAN inside PGN (e.g., malformed castle) — skip rest of this game
-                                games_skipped_parse += 1
+                            if bot_games_only:
+                                white_title = headers.get("WhiteTitle", "")
+                                black_title = headers.get("BlackTitle", "")
+                                if white_title != "BOT" or black_title != "BOT":
+                                    continue
+                            # Skip explicit variants
+                            if is_variant(headers):
                                 continue
-                            
-                            games_loaded += 1
-                            
-                        except ValueError:
-                            # Parsing error while reading game (commonly due to Chess960 castling SAN)
-                            games_skipped_parse += 1
-                            continue
+                            # If non-standard FEN start, mark as Chess960 to make castling SAN legal
+                            if not is_standard_start(headers):
+                                block = maybe_mark_chess960(block, headers)
                         except Exception:
-                            # Skip other problematic games silently
+                            continue
+
+                        try:
+                            game = chess.pgn.read_game(io.StringIO(block))
+                            if game is None:
+                                continue
+                        except Exception:
                             games_skipped_parse += 1
                             continue
+
+                        result = game.headers.get("Result", "*")
+                        if result == "1-0":
+                            game_outcome = 1.0
+                        elif result == "0-1":
+                            game_outcome = -1.0
+                        elif result == "1/2-1/2":
+                            game_outcome = 0.0
+                        else:
+                            continue
+
+                        board = game.board()
+                        move_count = 0
+                        try:
+                            for node in game.mainline():
+                                move_count += 1
+                                position_value = None
+                                if node.comment:
+                                    import re
+                                    eval_match = re.search(r'\[%eval ([#\-\d.]+)\]', node.comment)
+                                    if eval_match:
+                                        eval_str = eval_match.group(1)
+                                        if eval_str.startswith('#'):
+                                            mate_moves = int(eval_str[1:])
+                                            position_value = 10.0 if mate_moves > 0 else -10.0
+                                        else:
+                                            centipawns = float(eval_str)
+                                            position_value = np.tanh(centipawns / 400.0)
+                                if position_value is None:
+                                    position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
+                                    weight = min(move_count / 40.0, 1.0)
+                                    position_value = position_value * (0.3 + 0.7 * weight)
+                                else:
+                                    if board.turn == chess.BLACK:
+                                        position_value = -position_value
+                                try:
+                                    self.positions.append(self.encoder.encode_board(board))
+                                    self.outcomes.append(position_value)
+                                except Exception:
+                                    pass
+                                if node.move:
+                                    board.push(node.move)
+                        except ValueError:
+                            games_skipped_parse += 1
+                            continue
+                        games_loaded += 1
                     
         except Exception as e:
             print(f"\nError loading PGN.zst: {e}")
@@ -261,13 +310,9 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=0, min_elo=1
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    # Choose dataset source: 'standard' rated games or 'broadcast'
-    if source == "broadcast":
-        base = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-{:02d}.pgn.zst"
-    else:
-        base = "https://database.lichess.org/standard/lichess_db_standard_rated_2025-{:02d}.pgn.zst"
-    database_urls = [base.format(m) for m in range(1, 11)]
-    print(f"\n📥 Downloading Lichess databases (2025-01..2025-10)...")
+    # Using March 2015 Lichess database
+    database_urls = ["https://database.lichess.org/standard/lichess_db_standard_rated_2015-03.pgn.zst"]
+    print(f"\n📥 Using Lichess database (March 2015)...")
     for u in database_urls:
         print(f" - {u}")
     print(f"Quality filter: Players rated {min_elo}+ only")

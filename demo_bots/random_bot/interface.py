@@ -4,10 +4,10 @@ class Interface:
     def __init__(self):
         pass
 
-    def input():
+    def input(self):
         pass
 
-    def output():
+    def output(self, move):
         pass
 
 class CompetitionInterface(Interface):
