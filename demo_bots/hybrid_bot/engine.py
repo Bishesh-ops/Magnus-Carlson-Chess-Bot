@@ -410,6 +410,52 @@ class HybridEngine:
                         score -= 0.05 * sign
         return score
 
+    def _protection_bonus(self, board: chess.Board) -> float:
+        """Reward configurations where pawns/knights/bishops protect our king and queen.
+        Penalize if king/queen squares lack such defenders or are over-attacked by enemy minors/pawns.
+        Scaled roughly in pawn units.
+        """
+        score = 0.0
+        for color in (chess.WHITE, chess.BLACK):
+            sign = 1 if color == chess.WHITE else -1
+            enemy = not color
+            # King protection
+            ksq = board.king(color)
+            if ksq is not None:
+                defenders = board.attackers(color, ksq)
+                pawns_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.PAWN)
+                knights_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.KNIGHT)
+                bishops_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.BISHOP)
+                # Weights: king protection is more important
+                prot = 0.12 * pawns_def + 0.10 * knights_def + 0.10 * bishops_def
+                # Enemy pressure by minors/pawns
+                attackers = board.attackers(enemy, ksq)
+                pawn_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.PAWN)
+                knight_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.KNIGHT)
+                bishop_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.BISHOP)
+                pressure = 0.06 * pawn_att + 0.05 * knight_att + 0.05 * bishop_att
+                # Lack of any minor/pawn defender around king is dangerous
+                if (pawns_def + knights_def + bishops_def) == 0:
+                    prot -= 0.20
+                score += sign * (prot - pressure)
+            # Queen protection (lighter weight)
+            q_sqs = list(board.pieces(chess.QUEEN, color))
+            for qsq in q_sqs:
+                defenders = board.attackers(color, qsq)
+                pawns_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.PAWN)
+                knights_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.KNIGHT)
+                bishops_def = sum(1 for sq in defenders if (p := board.piece_at(sq)) and p.piece_type == chess.BISHOP)
+                prot = 0.06 * pawns_def + 0.05 * knights_def + 0.05 * bishops_def
+                attackers = board.attackers(enemy, qsq)
+                pawn_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.PAWN)
+                knight_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.KNIGHT)
+                bishop_att = sum(1 for sq in attackers if (p := board.piece_at(sq)) and p.piece_type == chess.BISHOP)
+                pressure = 0.04 * pawn_att + 0.03 * knight_att + 0.03 * bishop_att
+                if (pawns_def + knights_def + bishops_def) == 0:
+                    prot -= 0.08
+                score += sign * (prot - pressure)
+        return score
+
     def _endgame_bonus(self, board: chess.Board) -> float:
         # Simple heuristics: bishop pair, rook behind passed pawn (skip due to complexity simplified), king activity
         score = 0
@@ -431,11 +477,12 @@ class HybridEngine:
         mobility = self._mobility(board)
         king_safety = self._king_safety(board)
         activity = self._piece_activity(board)
+        protection = self._protection_bonus(board)
         endgame = self._endgame_bonus(board)
         phase = self._phase(board)
         # Tapered: weight some terms by phase
-        mg_score = material + pawn_struct + king_safety + activity + mobility
-        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5
+        mg_score = material + pawn_struct + king_safety + activity + mobility + protection
+        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5 + protection * 0.8
         blended = (1 - phase) * mg_score + phase * eg_score
         return blended
     

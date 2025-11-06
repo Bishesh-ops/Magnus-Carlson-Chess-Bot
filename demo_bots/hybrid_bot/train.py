@@ -387,8 +387,8 @@ if __name__ == "__main__":
 
     train(
         epochs=args.epochs,
-        batch_size=args["batch-size"] if isinstance(args, dict) else args.batch_size,
-        learning_rate=args["learning-rate"] if isinstance(args, dict) else args.learning_rate,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
         max_games=mg,
-        min_elo=args["min-elo"] if isinstance(args, dict) else args.min_elo,
+        min_elo=args.min_elo,
     )
