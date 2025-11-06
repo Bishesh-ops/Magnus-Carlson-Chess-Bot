@@ -78,7 +78,7 @@ class ChessGameDataset(Dataset):
 
     def _load_from_multiple_urls(self, urls, max_games, min_elo, bot_games_only):
         unlimited = (max_games is None) or (isinstance(max_games, int) and max_games <= 0)
-        total_loaded_before = len(self.positions)
+        games_loaded_total = 0
         for i, url in enumerate(urls, 1):
             try:
                 path = self._download_database(url)
@@ -87,11 +87,12 @@ class ChessGameDataset(Dataset):
                     continue
                 remaining_games = None
                 if not unlimited:
-                    remaining_games = max(0, max_games - (len(self.positions) - total_loaded_before))
+                    remaining_games = max(0, max_games - games_loaded_total)
                     if remaining_games <= 0:
                         break
-                self._load_games_from_pgn_zst(path, remaining_games, min_elo, bot_games_only)
-                print(f"Accumulated positions: {len(self.positions)}")
+                loaded_now = self._load_games_from_pgn_zst(path, remaining_games, min_elo, bot_games_only)
+                games_loaded_total += loaded_now
+                print(f"Month {i}: +{loaded_now} games, total_games={games_loaded_total}, accumulated_positions={len(self.positions)}")
             except Exception as e:
                 print(f"Error processing {url}: {e}")
                 continue
@@ -210,6 +211,7 @@ class ChessGameDataset(Dataset):
             print(f"\nError loading PGN.zst: {e}")
             import traceback
             traceback.print_exc()
+        return games_loaded
     
     def __len__(self):
         return len(self.positions)
