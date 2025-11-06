@@ -1,2 +1,5 @@
 chess == 1.11.2
 pygame == 2.6.1
+torch >= 2.0.0
+numpy >= 1.24.0
+pandas >= 2.0.0
