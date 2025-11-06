@@ -448,7 +448,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--max-games", type=int, default=20000, help="0 or negative means unlimited")
-    parser.add_argument("--min-elo", type=int, default=2200)
+    parser.add_argument("--min-elo", type=int, default=2000)
     parser.add_argument("--source", type=str, default="standard", choices=["standard", "broadcast"], help="Data source: standard rated games or broadcast snapshots")
     args = parser.parse_args()
 

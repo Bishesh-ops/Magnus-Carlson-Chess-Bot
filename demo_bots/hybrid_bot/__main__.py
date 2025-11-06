@@ -18,7 +18,7 @@ def main():
         parser.add_argument("--batch-size", type=int, default=256)
         parser.add_argument("--learning-rate", type=float, default=0.001)
         parser.add_argument("--max-games", type=int, default=20000)
-        parser.add_argument("--min-elo", type=int, default=2200)
+        parser.add_argument("--min-elo", type=int, default=2000)
         args, _ = parser.parse_known_args(sys.argv[2:])
         mg = None if args.max_games <= 0 else args.max_games
         train(
