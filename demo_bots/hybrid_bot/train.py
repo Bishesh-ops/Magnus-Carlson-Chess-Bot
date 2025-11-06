@@ -24,14 +24,20 @@ except ImportError:
 
 class ChessGameDataset(Dataset):
     
-    def __init__(self, pgn_zst_url=None, pgn_zst_path=None, max_games=5000, min_elo=1600, bot_games_only=False):
+    def __init__(self, pgn_zst_url=None, pgn_zst_urls=None, pgn_zst_path=None, max_games=5000, min_elo=1600, bot_games_only=False):
         self.positions = []
         self.outcomes = []
         self.encoder = BoardEncoder()
         
         print(f"Loading games from PGN.zst...")
         
-        # Download if URL provided
+        # Support a list of URLs (multiple months)
+        if pgn_zst_urls and isinstance(pgn_zst_urls, (list, tuple)):
+            self._load_from_multiple_urls(pgn_zst_urls, max_games, min_elo, bot_games_only)
+            print(f"Loaded {len(self.positions)} positions (multi-URL)")
+            return
+        
+        # Download if single URL provided
         if pgn_zst_url and not pgn_zst_path:
             pgn_zst_path = self._download_database(pgn_zst_url)
         
@@ -68,6 +74,23 @@ class ChessGameDataset(Dataset):
         
         print(f"\n✅ Downloaded to {filepath}")
         return filepath
+
+    def _load_from_multiple_urls(self, urls, max_games, min_elo, bot_games_only):
+        total_loaded_before = len(self.positions)
+        for i, url in enumerate(urls, 1):
+            try:
+                path = self._download_database(url)
+                if not path or not os.path.exists(path):
+                    print(f"Skipping URL (download failed): {url}")
+                    continue
+                remaining_games = max(0, max_games - (len(self.positions) - total_loaded_before))
+                if remaining_games <= 0:
+                    break
+                self._load_games_from_pgn_zst(path, remaining_games, min_elo, bot_games_only)
+                print(f"Accumulated positions: {len(self.positions)}")
+            except Exception as e:
+                print(f"Error processing {url}: {e}")
+                continue
     
     def _load_games_from_pgn_zst(self, filepath, max_games, min_elo, bot_games_only):
         games_loaded = 0
@@ -214,18 +237,19 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    # Download database from Lichess
-    database_url = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-10.pgn.zst"
-    
-    print(f"\n📥 Downloading Lichess database...")
-    print(f"URL: {database_url}")
+    # Download databases from Lichess (months 01..10)
+    base = "https://database.lichess.org/broadcast/lichess_db_broadcast_2025-{:02d}.pgn.zst"
+    database_urls = [base.format(m) for m in range(1, 11)]
+    print(f"\n📥 Downloading Lichess databases (2025-01..2025-10)...")
+    for u in database_urls:
+        print(f" - {u}")
     print(f"Quality filter: Players rated {min_elo}+ only")
     print(f"Target games: {max_games}")
     
     # Load dataset
     try:
         dataset = ChessGameDataset(
-            pgn_zst_url=database_url,
+            pgn_zst_urls=database_urls,
             max_games=max_games,
             min_elo=min_elo
         )
