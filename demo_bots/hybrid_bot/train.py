@@ -106,6 +106,11 @@ class ChessGameDataset(Dataset):
                                     black_title = headers.get("BlackTitle", "")
                                     if white_title != "BOT" or black_title != "BOT":
                                         continue
+
+                                # Filter out non-standard variants (e.g., chess960/FRC)
+                                variant = (headers.get("Variant", headers.get("VariantName", "standard")) or "standard").lower()
+                                if variant not in ("standard", "normal", "chess"):
+                                    continue
                             except:
                                 continue
                             
@@ -126,16 +131,7 @@ class ChessGameDataset(Dataset):
                             
                             for node in game.mainline():
                                 move_count += 1
-                                
-                                # Skip opening moves (use opening book for those)
-                                if move_count <= 10:
-                                    board.push(node.move) if node.move else None
-                                    continue
-                                
-                                # Skip endgames with few pieces (different dynamics)
-                                if len(board.piece_map()) < 10:
-                                    board.push(node.move) if node.move else None
-                                    continue
+                                # Include all phases (openings and endgames included)
                                 
                                 # Try to extract Stockfish evaluation from comment
                                 position_value = None

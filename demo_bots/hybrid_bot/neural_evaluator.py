@@ -6,6 +6,41 @@ import torch.nn.functional as F
 import chess
 import numpy as np
 
+# Simple move indexing: from_square (0..63) * 64 + to_square (0..63) yields 4096 possible non-promotion moves.
+# Promotion moves are rarer; we can approximate by adding 4 promotion piece channels offset.
+POLICY_SIZE = 4096 + (64 * 4)  # coarse upper bound; sparse usage
+
+def move_to_index(move: chess.Move) -> int:
+    base = move.from_square * 64 + move.to_square
+    if move.promotion:
+        # Promotion piece types mapped: N=0,B=1,R=2,Q=3
+        promo_map = {chess.KNIGHT:0, chess.BISHOP:1, chess.ROOK:2, chess.QUEEN:3}
+        offset = 4096 + move.from_square*4 + promo_map.get(move.promotion, 3)
+        return offset
+    return base
+
+def index_flip_horizontal(idx: int) -> int:
+    # Flip files horizontally for augmentation. Decode then re-encode.
+    if idx >= 4096:
+        # Promotion bucket
+        rel = idx - 4096
+        from_sq = rel // 4
+        promo_sub = rel % 4
+        fr_rank, fr_file = divmod(from_sq, 8)
+        fr_file_f = 7 - fr_file
+        # We cannot guarantee target square; treat as unchanged (approx) for simplicity.
+        new_from = fr_rank*8 + fr_file_f
+        return 4096 + new_from*4 + promo_sub
+    from_sq = idx // 64
+    to_sq = idx % 64
+    fr_rank, fr_file = divmod(from_sq, 8)
+    to_rank, to_file = divmod(to_sq, 8)
+    fr_file_f = 7 - fr_file
+    to_file_f = 7 - to_file
+    new_from = fr_rank*8 + fr_file_f
+    new_to = to_rank*8 + to_file_f
+    return new_from*64 + new_to
+
 
 class BoardEncoder:
     
@@ -71,23 +106,29 @@ class BoardEncoder:
 
 class CompactChessNet(nn.Module):
     
-    def __init__(self, num_filters=64):
+    def __init__(self, num_filters=128, num_res_blocks=6, policy=True):
         super(CompactChessNet, self).__init__()
         
         # Initial convolution to process board state
         self.conv1 = nn.Conv2d(14, num_filters, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(num_filters)
         
-        # Residual blocks for deep feature extraction
-        self.res_block1 = self._make_residual_block(num_filters)
-        self.res_block2 = self._make_residual_block(num_filters)
-        self.res_block3 = self._make_residual_block(num_filters)
+        self.res_blocks = nn.ModuleList([self._make_residual_block(num_filters) for _ in range(num_res_blocks)])
         
         # Value head - predicts position evaluation
         self.value_conv = nn.Conv2d(num_filters, 32, kernel_size=1)
         self.value_bn = nn.BatchNorm2d(32)
-        self.value_fc1 = nn.Linear(32 * 8 * 8, 128)
-        self.value_fc2 = nn.Linear(128, 1)
+        self.value_fc1 = nn.Linear(32 * 8 * 8, 256)
+        self.value_fc2 = nn.Linear(256, 64)
+        self.value_fc3 = nn.Linear(64, 1)
+
+        # Optional policy head
+        self.use_policy = policy
+        if self.use_policy:
+            self.policy_conv = nn.Conv2d(num_filters, 32, kernel_size=1)
+            self.policy_bn = nn.BatchNorm2d(32)
+            self.policy_fc1 = nn.Linear(32 * 8 * 8, 512)
+            self.policy_fc2 = nn.Linear(512, POLICY_SIZE)
         
     def _make_residual_block(self, num_filters):
         """Create a residual block with two convolutions"""
@@ -104,24 +145,24 @@ class CompactChessNet(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         
         # Residual blocks with skip connections
-        identity = x
-        x = self.res_block1(x)
-        x = F.relu(x + identity)
-        
-        identity = x
-        x = self.res_block2(x)
-        x = F.relu(x + identity)
-        
-        identity = x
-        x = self.res_block3(x)
-        x = F.relu(x + identity)
+        for block in self.res_blocks:
+            identity = x
+            x = block(x)
+            x = F.relu(x + identity)
         
         # Value head
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(-1, 32 * 8 * 8)
         v = F.relu(self.value_fc1(v))
-        v = torch.tanh(self.value_fc2(v))  # Output between -1 and 1
-        
+        v = F.relu(self.value_fc2(v))
+        v = torch.tanh(self.value_fc3(v))
+
+        if self.use_policy:
+            p = F.relu(self.policy_bn(self.policy_conv(identity)))  # use last identity (features) as base
+            p = p.view(-1, 32 * 8 * 8)
+            p = F.relu(self.policy_fc1(p))
+            p = self.policy_fc2(p)
+            return v, p
         return v
 
 
@@ -133,7 +174,7 @@ class NeuralEvaluator:
         else:
             self.device = device
         
-        self.model = CompactChessNet(num_filters=64).to(self.device)
+        self.model = CompactChessNet(num_filters=128, num_res_blocks=6, policy=True).to(self.device)
         self.encoder = BoardEncoder()
         
         # Load trained weights if provided
@@ -154,8 +195,12 @@ class NeuralEvaluator:
         
         # Get evaluation with inference optimizations
         with torch.no_grad():
-            with torch.inference_mode():  # Extra speed for inference
-                evaluation = self.model(board_tensor)
+            with torch.inference_mode():
+                out = self.model(board_tensor)
+                if isinstance(out, tuple):
+                    evaluation, _ = out
+                else:
+                    evaluation = out
         
         return evaluation.item()
     
@@ -167,8 +212,11 @@ class NeuralEvaluator:
         
         # Get evaluations
         with torch.no_grad():
-            evaluations = self.model(board_tensors)
-        
+            out = self.model(board_tensors)
+            if isinstance(out, tuple):
+                evaluations, _ = out
+            else:
+                evaluations = out
         return evaluations.cpu().numpy().flatten().tolist()
     
     def train_mode(self):
