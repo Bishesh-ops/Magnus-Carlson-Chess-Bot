@@ -101,6 +101,7 @@ class ChessGameDataset(Dataset):
         unlimited = (max_games is None) or (isinstance(max_games, int) and max_games <= 0)
         games_loaded = 0
         games_processed = 0
+        games_skipped_parse = 0
         print(f"Decompressing and parsing PGN.zst...")
         print(f"Filters: Bot-only={bot_games_only}, Min Elo={min_elo}")
         
@@ -158,48 +159,37 @@ class ChessGameDataset(Dataset):
                             board = game.board()
                             move_count = 0
                             
-                            for node in game.mainline():
-                                move_count += 1
-                                # Include all phases (openings and endgames included)
-                                
-                                # Try to extract Stockfish evaluation from comment
-                                position_value = None
-                                if node.comment:
-                                    # Parse [%eval X.XX] or [%eval #N]
-                                    import re
-                                    eval_match = re.search(r'\[%eval ([#\-\d.]+)\]', node.comment)
-                                    if eval_match:
-                                        eval_str = eval_match.group(1)
-                                        if eval_str.startswith('#'):
-                                            # Mate score: #3 = mate in 3
-                                            mate_moves = int(eval_str[1:])
-                                            position_value = 10.0 if mate_moves > 0 else -10.0
-                                        else:
-                                            # Centipawn evaluation: convert to normalized value
-                                            # Stockfish eval is from White's perspective
-                                            centipawns = float(eval_str)
-                                            # Normalize: tanh(cp/400) gives values in [-1, 1]
-                                            position_value = np.tanh(centipawns / 400.0)
-                                
-                                # Fallback to game outcome if no Stockfish eval
-                                if position_value is None:
-                                    position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
-                                    # Weight by game progress
-                                    weight = min(move_count / 40.0, 1.0)
-                                    position_value = position_value * (0.3 + 0.7 * weight)
-                                else:
-                                    # Stockfish eval is from White's perspective
-                                    # Adjust for current turn
-                                    if board.turn == chess.BLACK:
-                                        position_value = -position_value
-                                
-                                # Store position
-                                self.positions.append(self.encoder.encode_board(board))
-                                self.outcomes.append(position_value)
-                                
-                                # Push the move
-                                if node.move:
-                                    board.push(node.move)
+                            try:
+                                for node in game.mainline():
+                                    move_count += 1
+                                    # Try to extract Stockfish evaluation from comment
+                                    position_value = None
+                                    if node.comment:
+                                        import re
+                                        eval_match = re.search(r'\[%eval ([#\-\d.]+)\]', node.comment)
+                                        if eval_match:
+                                            eval_str = eval_match.group(1)
+                                            if eval_str.startswith('#'):
+                                                mate_moves = int(eval_str[1:])
+                                                position_value = 10.0 if mate_moves > 0 else -10.0
+                                            else:
+                                                centipawns = float(eval_str)
+                                                position_value = np.tanh(centipawns / 400.0)
+                                    if position_value is None:
+                                        position_value = game_outcome if board.turn == chess.WHITE else -game_outcome
+                                        weight = min(move_count / 40.0, 1.0)
+                                        position_value = position_value * (0.3 + 0.7 * weight)
+                                    else:
+                                        if board.turn == chess.BLACK:
+                                            position_value = -position_value
+                                    self.positions.append(self.encoder.encode_board(board))
+                                    self.outcomes.append(position_value)
+                                    if node.move:
+                                        board.push(node.move)
+                            except ValueError:
+                                # Illegal SAN inside PGN (e.g., malformed castle) — skip rest of this game
+                                games_skipped_parse += 1
+                                continue
                             
                             games_loaded += 1
                             
@@ -211,6 +201,8 @@ class ChessGameDataset(Dataset):
             print(f"\nError loading PGN.zst: {e}")
             import traceback
             traceback.print_exc()
+        if games_skipped_parse:
+            print(f"Skipped {games_skipped_parse} games due to parse errors (malformed SAN)")
         return games_loaded
     
     def __len__(self):
