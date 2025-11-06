@@ -311,6 +311,8 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
             # Forward pass
             optimizer.zero_grad()
             predictions = model(positions)
+            if isinstance(predictions, (tuple, list)):
+                predictions = predictions[0]
             loss = criterion(predictions, outcomes)
             
             # Backward pass
@@ -335,6 +337,8 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
                 positions = positions.to(device)
                 outcomes = outcomes.to(device)
                 predictions = model(positions)
+                if isinstance(predictions, (tuple, list)):
+                    predictions = predictions[0]
                 loss = criterion(predictions, outcomes)
                 val_loss += loss.item()
         
