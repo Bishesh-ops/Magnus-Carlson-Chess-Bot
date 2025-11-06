@@ -125,13 +125,16 @@ class OpeningBook:
         
         fen_key = board.fen().split(' ')[0]
         if fen_key in self.openings:
-            # Get the move with highest win rate
+            # Get ALL moves for this position sorted by win rate
             moves = self.openings[fen_key]
-            best_move = max(moves, key=lambda x: x[1])[0]
+            # Sort by win rate descending
+            sorted_moves = sorted(moves, key=lambda x: x[1], reverse=True)
             
-            # Verify move is still legal
-            if best_move in board.legal_moves:
-                return best_move
+            # Try each move in order of win rate until we find a legal one
+            legal_moves_set = set(board.legal_moves)
+            for move, win_rate in sorted_moves:
+                if move in legal_moves_set:
+                    return move
         
         return None
 
@@ -970,13 +973,19 @@ class HybridEngine:
                 raise ValueError("No legal moves available!")
             best_move = legal_moves[0]
         
-        # Verify move is legal before returning
-        if best_move not in board.legal_moves:
-            # This should never happen, but safety first
-            legal_moves = list(board.legal_moves)
-            if not legal_moves:
-                raise ValueError("No legal moves available!")
-            best_move = legal_moves[0]
+        # CRITICAL: Always verify move is legal before returning
+        # Create a fresh list of legal moves to be absolutely sure
+        legal_moves_list = list(board.legal_moves)
+        if not legal_moves_list:
+            raise ValueError("No legal moves available!")
+        
+        if best_move not in legal_moves_list:
+            # Log the error for debugging
+            import sys
+            print(f"WARNING: Engine produced illegal move {best_move} in position {board.fen()}", file=sys.stderr)
+            print(f"Legal moves are: {[board.san(m) for m in legal_moves_list[:5]]}", file=sys.stderr)
+            # Force fallback to first legal move
+            best_move = legal_moves_list[0]
         
         # Clear some caches to prevent memory bloat
         # TT is pruned by generation; as a safeguard, hard clear if still too large
