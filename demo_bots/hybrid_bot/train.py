@@ -76,6 +76,7 @@ class ChessGameDataset(Dataset):
         return filepath
 
     def _load_from_multiple_urls(self, urls, max_games, min_elo, bot_games_only):
+        unlimited = (max_games is None) or (isinstance(max_games, int) and max_games <= 0)
         total_loaded_before = len(self.positions)
         for i, url in enumerate(urls, 1):
             try:
@@ -83,9 +84,11 @@ class ChessGameDataset(Dataset):
                 if not path or not os.path.exists(path):
                     print(f"Skipping URL (download failed): {url}")
                     continue
-                remaining_games = max(0, max_games - (len(self.positions) - total_loaded_before))
-                if remaining_games <= 0:
-                    break
+                remaining_games = None
+                if not unlimited:
+                    remaining_games = max(0, max_games - (len(self.positions) - total_loaded_before))
+                    if remaining_games <= 0:
+                        break
                 self._load_games_from_pgn_zst(path, remaining_games, min_elo, bot_games_only)
                 print(f"Accumulated positions: {len(self.positions)}")
             except Exception as e:
@@ -93,6 +96,7 @@ class ChessGameDataset(Dataset):
                 continue
     
     def _load_games_from_pgn_zst(self, filepath, max_games, min_elo, bot_games_only):
+        unlimited = (max_games is None) or (isinstance(max_games, int) and max_games <= 0)
         games_loaded = 0
         games_processed = 0
         print(f"Decompressing and parsing PGN.zst...")
@@ -104,7 +108,7 @@ class ChessGameDataset(Dataset):
                 with dctx.stream_reader(compressed_file) as reader:
                     text_stream = io.TextIOWrapper(reader, encoding='utf-8')
                     
-                    while games_loaded < max_games:
+                    while unlimited or (games_loaded < max_games):
                         try:
                             game = chess.pgn.read_game(text_stream)
                             if game is None:
@@ -244,7 +248,8 @@ def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_el
     for u in database_urls:
         print(f" - {u}")
     print(f"Quality filter: Players rated {min_elo}+ only")
-    print(f"Target games: {max_games}")
+    target_label = 'UNLIMITED' if (max_games is None or (isinstance(max_games, int) and max_games <= 0)) else str(max_games)
+    print(f"Target games: {target_label}")
     
     # Load dataset
     try:
