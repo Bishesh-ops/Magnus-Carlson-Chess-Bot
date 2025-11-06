@@ -1,9 +1,4 @@
-"""
-Training script for the Hybrid Chess Bot
-
-This trains the neural evaluator on real chess games from Lichess database.
-Downloads PGN.zst format and trains on high-quality games.
-"""
+ 
 
 import os
 import sys
@@ -28,18 +23,8 @@ except ImportError:
 
 
 class ChessGameDataset(Dataset):
-    """Dataset of chess positions from PGN.zst files"""
     
     def __init__(self, pgn_zst_url=None, pgn_zst_path=None, max_games=5000, min_elo=2000):
-        """
-        Load chess games from PGN.zst and extract positions with outcomes.
-        
-        Args:
-            pgn_zst_url: URL to download PGN.zst file
-            pgn_zst_path: Local path to PGN.zst file (if already downloaded)
-            max_games: Maximum number of games to load
-            min_elo: Minimum Elo rating for players (quality filter)
-        """
         self.positions = []
         self.outcomes = []
         self.encoder = BoardEncoder()
@@ -58,7 +43,6 @@ class ChessGameDataset(Dataset):
         print(f"Loaded {len(self.positions)} positions from {max_games} games")
     
     def _download_database(self, url):
-        """Download PGN.zst database"""
         filename = os.path.basename(url)
         filepath = os.path.join(os.path.dirname(__file__), filename)
         
@@ -86,7 +70,6 @@ class ChessGameDataset(Dataset):
         return filepath
     
     def _load_games_from_pgn_zst(self, filepath, max_games, min_elo):
-        """Load games from compressed PGN.zst file with Stockfish evaluations"""
         games_loaded = 0
         games_processed = 0
         bot_games_only = True  # Filter for bot-only games (higher quality)
@@ -216,20 +199,6 @@ class ChessGameDataset(Dataset):
 
 
 def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_elo=2000):
-    """
-    Train the neural evaluator on high-quality Lichess games.
-    
-    Optimized for competition hardware (RTX 3090):
-    - Target: 40-45 minutes on RTX 3090
-    - Estimate: 2-3 hours on T4 GPU (Colab)
-    
-    Args:
-        epochs: Number of training epochs (15 recommended)
-        batch_size: Batch size for training (256 for GPU)
-        learning_rate: Learning rate for optimizer
-        max_games: Maximum games to load (5000 = ~200k positions)
-        min_elo: Minimum player Elo (2000+ for quality)
-    """
     print("=" * 80)
     print("HYBRID CHESS BOT - TRAINING THE NEURAL EVALUATOR")
     print("=" * 80)

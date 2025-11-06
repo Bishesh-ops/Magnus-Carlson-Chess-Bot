@@ -1,8 +1,4 @@
-"""
-Play module for the Hybrid Chess Bot
-
-Integrates the neural evaluator with the search engine for competitive play.
-"""
+ 
 
 import chess
 import os
@@ -11,13 +7,6 @@ from .engine import HybridEngine
 
 
 def play(interface: Interface, color="w"):
-    """
-    Main play function for the hybrid chess bot.
-    
-    Args:
-        interface: Communication interface (CompetitionInterface or TestInterface)
-        color: "w" for white, "b" for black
-    """
     # Initialize board
     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     board = chess.Board(fen)
@@ -27,64 +16,63 @@ def play(interface: Interface, color="w"):
     try:
         from .neural_evaluator import NeuralEvaluator
         
-        # Try to load trained model
+    # Load trained model if present
         model_path = os.path.join(os.path.dirname(__file__), "model_weights.pth")
         if os.path.exists(model_path):
-            # Silently load the model (don't print during competition)
+            # Silent load
             evaluator = NeuralEvaluator(model_path=model_path)
             # Use depth 4 with neural net (slower but smarter evaluation)
             engine = HybridEngine(neural_evaluator=evaluator, use_opening_book=True, search_depth=4)
         else:
-            # No model, use fallback with deeper search (faster evaluation)
+            # Fallback deeper search
             engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=5)
     except Exception as e:
         # Silently fall back to material evaluation with deeper search
         engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=5)
     
-    # If playing as black, wait for opponent's first move
+    # If black, read opponent first move
     if color == "b":
         move = interface.input()
         board.push_san(move)
     
     move_count = 0
     
-    # Main game loop
+    # Game loop
     while True:
         move_count += 1
         
-        # Calculate time budget for this move
-        # Fast early game (opening book), more time for complex middle/endgame
+    # Time budget per move
         if board.fullmove_number <= 15:
-            # Opening phase - very fast (opening book handles this)
+            # Opening phase
             time_per_move = 2.0
         elif board.fullmove_number <= 30:
-            # Middle game - moderate time
+            # Middle game
             time_per_move = 5.0
         else:
-            # Endgame - more time per move
+            # Endgame
             remaining_moves_estimate = max(50 - board.fullmove_number, 15)
             time_per_move = min(280 / remaining_moves_estimate, 10.0)
         
-        # Find best move using hybrid engine
+    # Search best move
         try:
             best_move = engine.find_best_move(board, time_limit=time_per_move)
             
-            # CRITICAL: Validate move is legal before outputting
+            # Validate move
             if best_move not in board.legal_moves:
                 # Invalid move returned! Use fallback
                 raise ValueError(f"Engine returned illegal move: {best_move}")
             
-            # Convert to SAN notation (also validates move)
+            # Convert to SAN notation
             move_san = board.san(best_move)
             
-            # Output the move
+            # Output
             interface.output(move_san)
             
-            # Make the move on our board
+            # Apply locally
             board.push(best_move)
             
         except Exception as e:
-            # Emergency fallback: pick first legal move
+            # Fallback: pick first legal move
             legal_moves = list(board.legal_moves)
             if not legal_moves:
                 # No legal moves (game over)
@@ -94,7 +82,7 @@ def play(interface: Interface, color="w"):
             interface.output(board.san(fallback_move))
             board.push(fallback_move)
         
-        # Receive opponent's move
+    # Read opponent move
         try:
             opponent_move = interface.input()
             board.push_san(opponent_move)
@@ -102,6 +90,6 @@ def play(interface: Interface, color="w"):
             print(f"Error processing opponent move: {e}")
             break
         
-        # Check if game is over
+    # Termination check
         if board.is_game_over():
             break

@@ -1,9 +1,4 @@
-"""
-Neural Network Evaluator - The "Intuitive Evaluator" / "Neuro-Aesthetic"
-
-This module implements a compact neural network that perceives board positions
-and assigns them a quantitative value. It's designed for speed - a "reflex" not a "meditation".
-"""
+ 
 
 import torch
 import torch.nn as nn
@@ -13,7 +8,6 @@ import numpy as np
 
 
 class BoardEncoder:
-    """Encodes chess board positions into neural network input tensors"""
     
     # Piece representation: 12 piece types (6 per color) + en passant + castling rights
     PIECE_TO_INDEX = {
@@ -76,14 +70,6 @@ class BoardEncoder:
 
 
 class CompactChessNet(nn.Module):
-    """
-    Compact Convolutional Neural Network for chess position evaluation.
-    
-    Architecture optimized for speed:
-    - Small number of filters
-    - Residual connections for gradient flow
-    - Minimal depth for fast inference
-    """
     
     def __init__(self, num_filters=64):
         super(CompactChessNet, self).__init__()
@@ -140,18 +126,8 @@ class CompactChessNet(nn.Module):
 
 
 class NeuralEvaluator:
-    """
-    The Intuitive Evaluator - wraps the neural network for easy evaluation.
-    """
     
     def __init__(self, model_path=None, device=None):
-        """
-        Initialize the evaluator.
-        
-        Args:
-            model_path: Path to trained model weights (optional)
-            device: torch device (cuda/cpu). Auto-detect if None.
-        """
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
@@ -172,17 +148,6 @@ class NeuralEvaluator:
         self.model.eval()
     
     def evaluate(self, board: chess.Board) -> float:
-        """
-        Evaluate a chess position.
-        
-        Args:
-            board: chess.Board object
-            
-        Returns:
-            float: Position evaluation from white's perspective
-                   Positive values favor white, negative favor black
-                   Range: approximately -1.0 to +1.0
-        """
         # Encode board
         board_tensor = self.encoder.encode_board(board)
         board_tensor = torch.from_numpy(board_tensor).unsqueeze(0).to(self.device)
@@ -195,15 +160,6 @@ class NeuralEvaluator:
         return evaluation.item()
     
     def evaluate_batch(self, boards: list) -> list:
-        """
-        Evaluate multiple positions efficiently in a batch.
-        
-        Args:
-            boards: List of chess.Board objects
-            
-        Returns:
-            List of float evaluations
-        """
         # Encode all boards
         board_tensors = [self.encoder.encode_board(board) for board in boards]
         board_tensors = np.stack(board_tensors)
@@ -216,18 +172,14 @@ class NeuralEvaluator:
         return evaluations.cpu().numpy().flatten().tolist()
     
     def train_mode(self):
-        """Switch model to training mode"""
         self.model.train()
     
     def eval_mode(self):
-        """Switch model to evaluation mode"""
         self.model.eval()
     
     def save(self, path):
-        """Save model weights"""
         torch.save(self.model.state_dict(), path)
     
     def load(self, path):
-        """Load model weights"""
         self.model.load_state_dict(torch.load(path, map_location=self.device))
         self.model.eval()

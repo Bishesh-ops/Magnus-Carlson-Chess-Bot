@@ -1,15 +1,11 @@
-"""
-Predictive Core - The "Structural Logic" / "Skeleton"
-
-This module implements the deterministic search algorithm with alpha-beta pruning,
-opening book integration, and move ordering for efficient tree exploration.
-"""
+ 
 
 import chess
 import time
 import os
 import pandas as pd
 from typing import Optional, Tuple, List
+from dataclasses import dataclass
 from .neural_evaluator import NeuralEvaluator
 
 
@@ -70,7 +66,6 @@ KING_MIDDLE_GAME_TABLE = [
 
 
 class OpeningBook:
-    """Manages the opening book database"""
     
     def __init__(self, openings_path=None):
         self.openings = {}
@@ -85,7 +80,6 @@ class OpeningBook:
             self._load_openings(openings_path)
     
     def _load_openings(self, path):
-        """Load opening book from CSV"""
         try:
             df = pd.read_csv(path)
             
@@ -122,13 +116,10 @@ class OpeningBook:
                             break
             
             self.loaded = True
-            # Silently loaded (no output during competition)
         except Exception as e:
-            # Silently fail (no output during competition)
             pass
     
     def get_opening_move(self, board: chess.Board) -> Optional[chess.Move]:
-        """Get the best opening move for this position"""
         if not self.loaded:
             return None
         
@@ -145,22 +136,18 @@ class OpeningBook:
         return None
 
 
+@dataclass
+class TTEntry:
+    score: float
+    depth: int
+    flag: str  # 'EXACT', 'LOWER', 'UPPER'
+    move: Optional[chess.Move]
+
+
 class HybridEngine:
-    """
-    The complete hybrid engine combining neural evaluation with alpha-beta search.
-    """
     
     def __init__(self, neural_evaluator: Optional[NeuralEvaluator] = None, 
                  use_opening_book=True, search_depth=4, verbose=False):
-        """
-        Initialize the hybrid chess engine.
-        
-        Args:
-            neural_evaluator: Neural network evaluator (optional, will use material count if None)
-            use_opening_book: Whether to use the opening book
-            search_depth: Default search depth
-            verbose: Whether to print search information (disable during competition)
-        """
         self.evaluator = neural_evaluator
         self.use_neural = neural_evaluator is not None
         
@@ -174,17 +161,28 @@ class HybridEngine:
         self.start_time = 0
         self.verbose = verbose
         
-        # Transposition table for memoization
+    # Transposition table for memoization (key -> TTEntry)
         self.transposition_table = {}
         
         # Move ordering history
         self.history_table = {}
+
+        # Killer moves heuristic: keep up to 2 killers per depth
+        self.killer_moves = {}
+
+        # Evaluation cache to avoid repeated neural/material evals
+        self.eval_cache = {}
+
+    def _tt_key(self, board: chess.Board):
+        """Return a fast transposition key; fallback to FEN if not available."""
+        # python-chess provides a fast Zobrist hash via transposition_key()
+        try:
+            return board.transposition_key()
+        except AttributeError:
+            # Fallback: include full FEN to distinguish castling/ep/turn
+            return board.fen()
     
     def _material_evaluation(self, board: chess.Board) -> float:
-        """
-        Fallback material-based evaluation with piece-square tables.
-        Returns evaluation from White's perspective.
-        """
         if board.is_checkmate():
             return -999999 if board.turn == chess.WHITE else 999999
         
@@ -216,34 +214,55 @@ class HybridEngine:
         return score / 100.0  # Normalize to similar scale as neural net
     
     def evaluate_position(self, board: chess.Board) -> float:
-        """
-        Evaluate a position using neural network or fallback.
-        Returns evaluation from White's perspective.
-        """
+        # Cache by transposition key
+        key = self._tt_key(board)
+        cached = self.eval_cache.get(key)
+        if cached is not None:
+            return cached
         # Check for terminal positions first
         if board.is_checkmate():
-            return -999999 if board.turn == chess.WHITE else 999999
+            val = -999999 if board.turn == chess.WHITE else 999999
+            self.eval_cache[key] = val
+            return val
         
         if board.is_stalemate() or board.is_insufficient_material():
-            return 0
+            self.eval_cache[key] = 0.0
+            return 0.0
         
         # Use neural evaluator if available
         if self.use_neural and self.evaluator:
             try:
-                return self.evaluator.evaluate(board)
+                val = self.evaluator.evaluate(board)
+                self.eval_cache[key] = val
+                return val
             except:
                 pass
         
         # Fallback to material evaluation
-        return self._material_evaluation(board)
+        val = self._material_evaluation(board)
+        self.eval_cache[key] = val
+        return val
     
-    def _order_moves(self, board: chess.Board, moves: List[chess.Move]) -> List[chess.Move]:
-        """
-        Order moves for better alpha-beta pruning.
-        Priority: captures, checks, then history heuristic.
-        """
+    def _order_moves(self, board: chess.Board, moves: List[chess.Move], depth: int = 0) -> List[chess.Move]:
+        # Prefer TT move if available
+        tt_move = None
+        tt_entry = self.transposition_table.get(self._tt_key(board))
+        if isinstance(tt_entry, TTEntry) and tt_entry.move in moves:
+            tt_move = tt_entry.move
+
+        killers = self.killer_moves.get(depth, [])
+
         def move_score(move):
             score = 0
+
+            # TT move gets highest priority
+            if tt_move is not None and move == tt_move:
+                score += 100000
+
+            # Killer moves (only for non-captures)
+            if move in killers and not board.is_capture(move):
+                # Newer killer gets slightly higher score
+                score += 50000 - (killers.index(move) * 100)
             
             # Prioritize captures (MVV-LVA: Most Valuable Victim - Least Valuable Attacker)
             if board.is_capture(move):
@@ -268,13 +287,10 @@ class HybridEngine:
             
             return score
         
-        return sorted(moves, key=move_score, reverse=True)
+        ordered = sorted(moves, key=move_score, reverse=True)
+        return ordered
     
     def _quiescence_search(self, board: chess.Board, alpha: float, beta: float) -> float:
-        """
-        Quiescence search to avoid horizon effect.
-        Only searches tactical moves (captures, checks).
-        """
         self.nodes_searched += 1
         
         # Stand pat evaluation
@@ -303,10 +319,6 @@ class HybridEngine:
     
     def _alpha_beta(self, board: chess.Board, depth: int, alpha: float, 
                     beta: float, maximizing: bool) -> float:
-        """
-        Alpha-beta pruning search algorithm.
-        The heart of the "Predictive Core".
-        """
         self.nodes_searched += 1
         
         # Check time limit
@@ -314,70 +326,99 @@ class HybridEngine:
             return self.evaluate_position(board)
         
         # Check transposition table
-        board_hash = board.fen()
-        if board_hash in self.transposition_table:
-            cached_depth, cached_score = self.transposition_table[board_hash]
-            if cached_depth >= depth:
-                return cached_score
+        key = self._tt_key(board)
+        tt = self.transposition_table.get(key)
+        if isinstance(tt, TTEntry) and tt.depth >= depth:
+            if tt.flag == 'EXACT':
+                return tt.score
+            elif tt.flag == 'LOWER':
+                alpha = max(alpha, tt.score)
+            elif tt.flag == 'UPPER':
+                beta = min(beta, tt.score)
+            if alpha >= beta:
+                return tt.score
         
-        # Terminal node or depth limit reached
+    # Terminal node or depth limit reached
         if depth == 0 or board.is_game_over():
             # Use quiescence search at leaf nodes
             return self._quiescence_search(board, alpha, beta)
         
+        # Generate and order moves
         legal_moves = list(board.legal_moves)
-        ordered_moves = self._order_moves(board, legal_moves)
+        ordered_moves = self._order_moves(board, legal_moves, depth)
         
         if maximizing:
             max_eval = float('-inf')
+            best_move = None
+            original_alpha, original_beta = alpha, beta
             for move in ordered_moves:
                 board.push(move)
                 eval_score = self._alpha_beta(board, depth - 1, alpha, beta, False)
                 board.pop()
                 
-                max_eval = max(max_eval, eval_score)
+                if eval_score > max_eval:
+                    max_eval = eval_score
+                    best_move = move
                 alpha = max(alpha, eval_score)
                 
                 if beta <= alpha:
                     # Update history heuristic for cutoff moves
                     move_key = (move.from_square, move.to_square)
                     self.history_table[move_key] = self.history_table.get(move_key, 0) + depth * depth
+                    # Killer move update (non-captures)
+                    if not board.is_capture(move):
+                        km = self.killer_moves.get(depth, [])
+                        if move in km:
+                            km.remove(move)
+                        km.insert(0, move)
+                        self.killer_moves[depth] = km[:2]
                     break
             
-            # Store in transposition table
-            self.transposition_table[board_hash] = (depth, max_eval)
+            # Store in transposition table with bound info
+            flag = 'EXACT'
+            if max_eval <= original_alpha:
+                flag = 'UPPER'
+            elif max_eval >= original_beta:
+                flag = 'LOWER'
+            self.transposition_table[key] = TTEntry(score=max_eval, depth=depth, flag=flag, move=best_move)
             return max_eval
         else:
             min_eval = float('inf')
+            best_move = None
+            original_alpha, original_beta = alpha, beta
             for move in ordered_moves:
                 board.push(move)
                 eval_score = self._alpha_beta(board, depth - 1, alpha, beta, True)
                 board.pop()
                 
-                min_eval = min(min_eval, eval_score)
+                if eval_score < min_eval:
+                    min_eval = eval_score
+                    best_move = move
                 beta = min(beta, eval_score)
                 
                 if beta <= alpha:
                     # Update history heuristic for cutoff moves
                     move_key = (move.from_square, move.to_square)
                     self.history_table[move_key] = self.history_table.get(move_key, 0) + depth * depth
+                    # Killer move update (non-captures)
+                    if not board.is_capture(move):
+                        km = self.killer_moves.get(depth, [])
+                        if move in km:
+                            km.remove(move)
+                        km.insert(0, move)
+                        self.killer_moves[depth] = km[:2]
                     break
             
-            # Store in transposition table
-            self.transposition_table[board_hash] = (depth, min_eval)
+            # Store in transposition table with bound info
+            flag = 'EXACT'
+            if min_eval <= original_alpha:
+                flag = 'UPPER'
+            elif min_eval >= original_beta:
+                flag = 'LOWER'
+            self.transposition_table[key] = TTEntry(score=min_eval, depth=depth, flag=flag, move=best_move)
             return min_eval
     
     def find_best_move(self, board: chess.Board, time_limit: Optional[float] = None) -> chess.Move:
-        """
-        Find the best move using iterative deepening with time management.
-        
-        Args:
-            board: Current board position
-            time_limit: Maximum time to search (seconds)
-            
-        Returns:
-            Best move found
-        """
         # Check opening book first
         if self.opening_book and board.fullmove_number <= 15:
             opening_move = self.opening_book.get_opening_move(board)
@@ -394,6 +435,7 @@ class HybridEngine:
         
         best_move = None
         best_value = float('-inf') if board.turn == chess.WHITE else float('inf')
+        prev_best = None
         
         # Iterative deepening: start with shallow depth, increase gradually
         for current_depth in range(1, self.base_depth + 5):
@@ -401,11 +443,17 @@ class HybridEngine:
                 break
             
             depth_best_move = None
-            alpha = float('-inf')
-            beta = float('inf')
+            # Aspiration window around previous best to speed up
+            if prev_best is not None:
+                window = 0.50  # half-pawn window
+                alpha = prev_best - window
+                beta = prev_best + window
+            else:
+                alpha = float('-inf')
+                beta = float('inf')
             
             legal_moves = list(board.legal_moves)
-            ordered_moves = self._order_moves(board, legal_moves)
+            ordered_moves = self._order_moves(board, legal_moves, current_depth)
             
             for move in ordered_moves:
                 board.push(move)
@@ -437,6 +485,7 @@ class HybridEngine:
             
             if depth_best_move:
                 best_move = depth_best_move
+                prev_best = best_value
             
             if self.verbose:
                 elapsed = time.time() - self.start_time
@@ -454,7 +503,7 @@ class HybridEngine:
                 raise ValueError("No legal moves available!")
             best_move = legal_moves[0]
         
-        # CRITICAL SAFETY CHECK: Verify move is legal before returning
+        # Verify move is legal before returning
         if best_move not in board.legal_moves:
             # This should never happen, but safety first
             legal_moves = list(board.legal_moves)
@@ -463,7 +512,9 @@ class HybridEngine:
             best_move = legal_moves[0]
         
         # Clear some cache to prevent memory bloat
-        if len(self.transposition_table) > 100000:
+        if len(self.transposition_table) > 200000:
             self.transposition_table.clear()
+        if len(self.eval_cache) > 200000:
+            self.eval_cache.clear()
         
         return best_move
