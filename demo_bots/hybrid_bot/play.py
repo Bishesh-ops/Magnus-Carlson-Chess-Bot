@@ -1,6 +1,7 @@
  
 
 import chess
+import time
 import os
 from .interface import Interface
 from .engine import HybridEngine
@@ -36,25 +37,30 @@ def play(interface: Interface, color="w"):
         board.push_san(move)
     
     move_count = 0
+    total_budget = 280.0
+    time_remaining = total_budget
     
     # Game loop
     while True:
         move_count += 1
         
     # Time budget per move
-        if board.fullmove_number <= 15:
-            # Opening phase
-            time_per_move = 2.0
-        elif board.fullmove_number <= 30:
-            # Middle game
-            time_per_move = 5.0
+        phase = board.fullmove_number
+        moves_to_go = max(12, 50 - phase)
+        min_floor = 3.0
+        if phase <= 10:
+            base = 5.0
+        elif phase <= 25:
+            base = 8.0
         else:
-            # Endgame
-            remaining_moves_estimate = max(50 - board.fullmove_number, 15)
-            time_per_move = min(280 / remaining_moves_estimate, 10.0)
+            base = 10.0
+        # Respect remaining time
+        fair_share = max(min_floor, (time_remaining / moves_to_go) * 1.3)
+        time_per_move = max(min_floor, min(base, fair_share, time_remaining * 0.5))
         
     # Search best move
         try:
+            start = time.time()
             best_move = engine.find_best_move(board, time_limit=time_per_move)
             
             # Validate move
@@ -70,6 +76,9 @@ def play(interface: Interface, color="w"):
             
             # Apply locally
             board.push(best_move)
+            # Update remaining time by actual think time (best effort)
+            elapsed = time.time() - start
+            time_remaining = max(0.0, time_remaining - elapsed)
             
         except Exception as e:
             # Fallback: pick first legal move

@@ -24,7 +24,7 @@ except ImportError:
 
 class ChessGameDataset(Dataset):
     
-    def __init__(self, pgn_zst_url=None, pgn_zst_path=None, max_games=5000, min_elo=2000):
+    def __init__(self, pgn_zst_url=None, pgn_zst_path=None, max_games=5000, min_elo=1600, bot_games_only=False):
         self.positions = []
         self.outcomes = []
         self.encoder = BoardEncoder()
@@ -36,7 +36,7 @@ class ChessGameDataset(Dataset):
             pgn_zst_path = self._download_database(pgn_zst_url)
         
         if pgn_zst_path and os.path.exists(pgn_zst_path):
-            self._load_games_from_pgn_zst(pgn_zst_path, max_games, min_elo)
+            self._load_games_from_pgn_zst(pgn_zst_path, max_games, min_elo, bot_games_only)
         else:
             print(f"ERROR: No PGN.zst file found!")
             
@@ -69,11 +69,9 @@ class ChessGameDataset(Dataset):
         print(f"\n✅ Downloaded to {filepath}")
         return filepath
     
-    def _load_games_from_pgn_zst(self, filepath, max_games, min_elo):
+    def _load_games_from_pgn_zst(self, filepath, max_games, min_elo, bot_games_only):
         games_loaded = 0
         games_processed = 0
-        bot_games_only = True  # Filter for bot-only games (higher quality)
-        
         print(f"Decompressing and parsing PGN.zst...")
         print(f"Filters: Bot-only={bot_games_only}, Min Elo={min_elo}")
         
@@ -102,7 +100,7 @@ class ChessGameDataset(Dataset):
                                 if white_elo < min_elo or black_elo < min_elo:
                                     continue
                                 
-                                # Filter for bot-only games (higher quality for competition)
+                                # Optional filter for bot-only games if requested
                                 if bot_games_only:
                                     white_title = headers.get("WhiteTitle", "")
                                     black_title = headers.get("BlackTitle", "")
@@ -198,7 +196,7 @@ class ChessGameDataset(Dataset):
         return position, outcome
 
 
-def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_elo=2000):
+def train(epochs=15, batch_size=256, learning_rate=0.001, max_games=5000, min_elo=1600):
     print("=" * 80)
     print("HYBRID CHESS BOT - TRAINING THE NEURAL EVALUATOR")
     print("=" * 80)
