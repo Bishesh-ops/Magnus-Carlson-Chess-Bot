@@ -429,6 +429,60 @@ class HybridEngine:
                     prot -= 0.08
                 score += sign * (prot - pressure)
         return score
+    def _pawn_promotion_rush(self, board: chess.Board) -> float:
+        """
+        When opponent has only king left, heavily prioritize pushing pawns to promote.
+        This prevents the bot from shuffling pieces instead of winning.
+        """
+        score = 0.0
+        
+        for color in (chess.WHITE, chess.BLACK):
+            enemy = not color
+            sign = 1 if color == chess.WHITE else -1
+            
+            # Check if enemy has only king (no other pieces)
+            enemy_has_only_king = True
+            for piece_type in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+                if board.pieces(piece_type, enemy):
+                    enemy_has_only_king = False
+                    break
+            
+            if enemy_has_only_king:
+                # Enemy has only king! Push pawns aggressively
+                for pawn_sq in board.pieces(chess.PAWN, color):
+                    rank = pawn_sq // 8
+                    
+                    # Reward based on how close pawn is to promotion
+                    if color == chess.WHITE:
+                        # White pawns promote on rank 8 (index 7)
+                        distance_to_promotion = 7 - rank
+                        # Huge bonus for advanced pawns
+                        bonus = (7 - distance_to_promotion) * 1.5  # Up to 10.5 for 7th rank
+                        if rank >= 6:  # 7th or 8th rank
+                            bonus += 5.0  # Extra huge bonus for pawns about to promote
+                    else:
+                        # Black pawns promote on rank 1 (index 0)
+                        distance_to_promotion = rank
+                        bonus = (7 - distance_to_promotion) * 1.5
+                        if rank <= 1:  # 2nd or 1st rank
+                            bonus += 5.0
+                    
+                    score += bonus * sign
+                
+                # Also reward king activity (helping pawns)
+                king_sq = board.king(color)
+                if king_sq is not None:
+                    king_rank = king_sq // 8
+                    # Reward king advancing towards center in endgame
+                    if color == chess.WHITE:
+                        king_advancement = king_rank  # Higher rank = more advanced
+                        score += king_advancement * 0.3 * sign
+                    else:
+                        king_advancement = 7 - king_rank
+                        score += king_advancement * 0.3 * sign
+        
+        return score
+    
     def _endgame_bonus(self, board: chess.Board) -> float:
         score = 0
         for color in (chess.WHITE, chess.BLACK):
@@ -469,9 +523,10 @@ class HybridEngine:
         protection = self._protection_bonus(board)
         endgame = self._endgame_bonus(board)
         hanging = self._hanging_pieces(board)  # Critical for tactical awareness!
+        pawn_rush = self._pawn_promotion_rush(board)  # King-only endgames!
         phase = self._phase(board)
         mg_score = material + pawn_struct + king_safety + activity + mobility + protection + hanging
-        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5 + protection * 0.8 + hanging
+        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5 + protection * 0.8 + hanging + pawn_rush
         blended = (1 - phase) * mg_score + phase * eg_score
         return blended
     def evaluate_position(self, board: chess.Board) -> float:
@@ -529,10 +584,12 @@ class HybridEngine:
             board.push(move)
             if board.is_check():
                 score += 7000
+            # Reduce move ordering penalties for repetition
+            # We still want to consider these moves in the search
             if board.is_repetition(2):
-                score -= 100000
+                score -= 15000  # Reduced from 100000
             elif board.is_repetition(1):
-                score -= 30000
+                score -= 5000   # Reduced from 30000
             board.pop()
             piece = board.piece_at(move.from_square)
             if piece and piece.piece_type == chess.KING:
@@ -561,6 +618,27 @@ class HybridEngine:
                     score += 12000
                 else:
                     score += 8000
+            
+            # Special bonus for pawn pushes when opponent has only king
+            if piece and piece.piece_type == chess.PAWN:
+                enemy = not piece.color
+                # Check if opponent has only king
+                enemy_has_only_king = True
+                for pt in [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+                    if board.pieces(pt, enemy):
+                        enemy_has_only_king = False
+                        break
+                
+                if enemy_has_only_king:
+                    # Massively prioritize pawn pushes!
+                    to_rank = move.to_square // 8
+                    if piece.color == chess.WHITE:
+                        # Reward pushing towards 8th rank
+                        score += to_rank * 15000  # Huge bonus for advanced pawns
+                    else:
+                        # Reward pushing towards 1st rank
+                        score += (7 - to_rank) * 15000
+            
             return score
         ordered = sorted(moves, key=move_score, reverse=True)
         return ordered
@@ -866,19 +944,30 @@ class HybridEngine:
                 else:
                     move_value = self._alpha_beta(board, current_depth - 1, alpha, beta, False)
                 
-                # Enhanced repetition penalties
+                # Smart repetition penalties - only apply in equal/near-equal positions
+                # If we're winning/losing significantly, repetition might be correct
+                is_close_position = abs(move_value) < 2.5
+                
                 if board.is_repetition(2):
-                    # Very strong penalty for twofold repetition (approaching threefold)
-                    repetition_penalty = 8.0
-                    if abs(move_value) < 5.0:
+                    # Twofold repetition (approaching threefold draw)
+                    if is_close_position:
+                        # In equal positions, heavily discourage repetition
+                        repetition_penalty = 5.0
+                        if board.turn == chess.WHITE:
+                            move_value -= repetition_penalty
+                        else:
+                            move_value += repetition_penalty
+                    elif abs(move_value) < 5.0:
+                        # Moderate penalty if position is somewhat unequal
+                        repetition_penalty = 2.0
                         if board.turn == chess.WHITE:
                             move_value -= repetition_penalty
                         else:
                             move_value += repetition_penalty
                 elif board.is_repetition(1):
-                    # Strong penalty for first repetition
-                    repetition_penalty = 3.5
-                    if abs(move_value) < 3.0:
+                    # First repetition - lighter penalty
+                    if is_close_position:
+                        repetition_penalty = 1.5
                         if board.turn == chess.WHITE:
                             move_value -= repetition_penalty
                         else:
@@ -886,14 +975,13 @@ class HybridEngine:
                 
                 board.pop()
                 
-                # Additional penalty for moves creating cycles
-                if self._is_move_creating_cycle(board, move, lookback=10):
-                    cycle_penalty = 5.0
-                    if abs(move_value) < 4.0:
-                        if board.turn == chess.WHITE:
-                            move_value -= cycle_penalty
-                        else:
-                            move_value += cycle_penalty
+                # Additional penalty for moves creating cycles (only in equal positions)
+                if is_close_position and self._is_move_creating_cycle(board, move, lookback=10):
+                    cycle_penalty = 2.5
+                    if board.turn == chess.WHITE:
+                        move_value -= cycle_penalty
+                    else:
+                        move_value += cycle_penalty
                 if board.turn == chess.WHITE:
                     if move_value > best_value:
                         if depth_best_move is not None:
@@ -966,8 +1054,11 @@ class HybridEngine:
                 raise ValueError("No legal moves available!")
             best_move = legal_moves[0]
         
-        # Enhanced repetition avoidance with cycle detection
-        if best_move and abs(best_value) < 4.0:
+        # Smart repetition avoidance - only avoid in equal/near-equal positions
+        # If we're clearly winning or losing, repetition might be the best move
+        is_position_close = abs(best_value) < 2.0
+        
+        if best_move and is_position_close:
             board.push(best_move)
             is_rep_2 = board.is_repetition(2)
             is_rep_1 = board.is_repetition(1)
@@ -976,12 +1067,15 @@ class HybridEngine:
             # Check for move cycles using our history tracker
             is_creating_cycle = self._is_move_creating_cycle(board, best_move, lookback=12)
             
-            if is_rep_2 or is_creating_cycle or (is_rep_1 and abs(best_value) < 2.5):
+            # Only try to avoid if position is close to equal
+            if is_rep_2 or (is_creating_cycle and abs(best_value) < 1.5):
                 legal_moves_list = list(board.legal_moves)
                 found_alternative = False
+                best_alt_value = float('-inf') if board.turn == chess.WHITE else float('inf')
+                best_alt_move = None
                 
-                # Try to find a move that doesn't create repetition or cycles
-                for alt_move in legal_moves_list:
+                # Find the best alternative that doesn't repeat
+                for alt_move in legal_moves_list[:20]:  # Check top 20 moves
                     if alt_move == best_move:
                         continue
                     
@@ -992,16 +1086,31 @@ class HybridEngine:
                     
                     alt_is_cycle = self._is_move_creating_cycle(board, alt_move, lookback=12)
                     
-                    # Prefer moves that don't create any repetition or cycles
-                    if not alt_is_rep_2 and not alt_is_cycle and not alt_is_rep_1:
-                        old_move = best_move
-                        best_move = alt_move
-                        found_alternative = True
-                        if self.verbose:
-                            print(f"AVOIDING REPETITION/CYCLE: {board.san(old_move)} → {board.san(alt_move)}")
-                        break
+                    # Look for non-repeating moves
+                    if not alt_is_rep_2 and not alt_is_cycle:
+                        # Quick eval of this alternative
+                        board.push(alt_move)
+                        alt_eval = self.evaluate_position(board)
+                        board.pop()
+                        
+                        # If alternative is close in value, use it
+                        if board.turn == chess.WHITE:
+                            if alt_eval > best_alt_value and alt_eval > best_value - 1.0:
+                                best_alt_value = alt_eval
+                                best_alt_move = alt_move
+                        else:
+                            if alt_eval < best_alt_value and alt_eval < best_value + 1.0:
+                                best_alt_value = alt_eval
+                                best_alt_move = alt_move
                 
-                # If we still haven't found a good alternative, at least avoid twofold repetition
+                if best_alt_move is not None:
+                    old_move = best_move
+                    best_move = best_alt_move
+                    found_alternative = True
+                    if self.verbose:
+                        print(f"AVOIDING REPETITION: {board.san(old_move)} → {board.san(best_move)}")
+                
+                # If we still haven't found a good alternative, at least avoid threefold draw
                 if not found_alternative and is_rep_2:
                     for alt_move in legal_moves_list:
                         if alt_move == best_move:
