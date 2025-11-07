@@ -133,6 +133,9 @@ class HybridEngine:
         self._last_root_moves = []
         self.last_depth_nodes = None
         self.branching_factors = []
+        # Track recent moves to detect repetition cycles
+        self.recent_moves_history = []
+        self.max_history_length = 20
     def _tt_store(self, key, score: float, depth: int, flag: str, move: Optional[chess.Move]):
         """Store TT entry using replacement policy: replace if deeper or same depth & newer generation."""
         new_entry = TTEntry(score=score, depth=depth, flag=flag, move=move, generation=self.tt_generation)
@@ -307,6 +310,47 @@ class HybridEngine:
                 penalty += 0.35 * (1.0 - phase * 0.5)
             score += (-penalty if color == chess.WHITE else penalty)
         return score
+    def _hanging_pieces(self, board: chess.Board) -> float:
+        """Heavily penalize hanging (undefended and attacked) pieces."""
+        score = 0.0
+        
+        for color in (chess.WHITE, chess.BLACK):
+            enemy = not color
+            sign = 1 if color == chess.WHITE else -1
+            
+            # Check all pieces except pawns and king
+            for piece_type in [chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+                for sq in board.pieces(piece_type, color):
+                    # Check if attacked by enemy
+                    enemy_attackers = board.attackers(enemy, sq)
+                    if enemy_attackers:
+                        # Check if defended by our pieces
+                        our_defenders = board.attackers(color, sq)
+                        
+                        # Count attackers and defenders
+                        num_attackers = len(enemy_attackers)
+                        num_defenders = len(our_defenders)
+                        
+                        if num_defenders == 0:
+                            # Completely hanging! Major penalty
+                            penalty = PIECE_VALUES[piece_type] / 100.0 * 0.8
+                            score -= penalty * sign
+                        elif num_attackers > num_defenders:
+                            # Under-defended - still bad
+                            penalty = PIECE_VALUES[piece_type] / 100.0 * 0.4
+                            score -= penalty * sign
+                        
+                        # Extra penalty if attacked by lower value piece
+                        for att_sq in enemy_attackers:
+                            attacker = board.piece_at(att_sq)
+                            if attacker:
+                                if attacker.piece_type == chess.PAWN and piece_type != chess.PAWN:
+                                    # Valuable piece attacked by pawn - very bad
+                                    score -= (PIECE_VALUES[piece_type] / 100.0 * 0.3) * sign
+                                    break
+        
+        return score
+    
     def _piece_activity(self, board: chess.Board) -> float:
         score = 0
         center = {chess.D4, chess.D5, chess.E4, chess.E5}
@@ -397,6 +441,25 @@ class HybridEngine:
                 if 2 <= rank <= 5:
                     score += 0.05 * sign
         return score
+    def _is_move_creating_cycle(self, board: chess.Board, move: chess.Move, lookback: int = 8) -> bool:
+        """Check if making this move would create a repetitive cycle."""
+        if len(self.recent_moves_history) < 4:
+            return False
+        
+        # Simulate the move
+        board.push(move)
+        new_fen_key = board.fen().split(' ')[0]  # Position only, ignore move counters
+        board.pop()
+        
+        # Check if this position appeared recently
+        position_count = 0
+        for i in range(max(0, len(self.recent_moves_history) - lookback), len(self.recent_moves_history)):
+            if self.recent_moves_history[i] == new_fen_key:
+                position_count += 1
+        
+        # If we've seen this position 2+ times in recent history, it's a cycle
+        return position_count >= 2
+    
     def _classical_eval(self, board: chess.Board) -> float:
         material = self._material_evaluation(board)
         pawn_struct = self._pawn_structure_eval(board)
@@ -405,9 +468,10 @@ class HybridEngine:
         activity = self._piece_activity(board)
         protection = self._protection_bonus(board)
         endgame = self._endgame_bonus(board)
+        hanging = self._hanging_pieces(board)  # Critical for tactical awareness!
         phase = self._phase(board)
-        mg_score = material + pawn_struct + king_safety + activity + mobility + protection
-        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5 + protection * 0.8
+        mg_score = material + pawn_struct + king_safety + activity + mobility + protection + hanging
+        eg_score = material + pawn_struct + endgame + activity * 0.5 + mobility * 0.5 + protection * 0.8 + hanging
         blended = (1 - phase) * mg_score + phase * eg_score
         return blended
     def evaluate_position(self, board: chess.Board) -> float:
@@ -743,6 +807,13 @@ class HybridEngine:
             return min_eval
     def find_best_move(self, board: chess.Board, time_limit: Optional[float] = None) -> chess.Move:
         board = board.copy()
+        
+        # Record current position for cycle detection
+        current_fen_key = board.fen().split(' ')[0]
+        self.recent_moves_history.append(current_fen_key)
+        if len(self.recent_moves_history) > self.max_history_length:
+            self.recent_moves_history.pop(0)
+        
         if self.opening_book and board.fullmove_number <= 15:
             opening_move = self.opening_book.get_opening_move(board)
             if opening_move:
@@ -794,21 +865,35 @@ class HybridEngine:
                     move_value = self._alpha_beta(board, current_depth - 1, alpha, beta, True)
                 else:
                     move_value = self._alpha_beta(board, current_depth - 1, alpha, beta, False)
+                
+                # Enhanced repetition penalties
                 if board.is_repetition(2):
-                    repetition_penalty = 4.5
-                    if abs(move_value) < 3.5:
+                    # Very strong penalty for twofold repetition (approaching threefold)
+                    repetition_penalty = 8.0
+                    if abs(move_value) < 5.0:
                         if board.turn == chess.WHITE:
                             move_value -= repetition_penalty
                         else:
                             move_value += repetition_penalty
                 elif board.is_repetition(1):
-                    repetition_penalty = 2.0
-                    if abs(move_value) < 2.5:
+                    # Strong penalty for first repetition
+                    repetition_penalty = 3.5
+                    if abs(move_value) < 3.0:
                         if board.turn == chess.WHITE:
                             move_value -= repetition_penalty
                         else:
                             move_value += repetition_penalty
+                
                 board.pop()
+                
+                # Additional penalty for moves creating cycles
+                if self._is_move_creating_cycle(board, move, lookback=10):
+                    cycle_penalty = 5.0
+                    if abs(move_value) < 4.0:
+                        if board.turn == chess.WHITE:
+                            move_value -= cycle_penalty
+                        else:
+                            move_value += cycle_penalty
                 if board.turn == chess.WHITE:
                     if move_value > best_value:
                         if depth_best_move is not None:
@@ -880,39 +965,55 @@ class HybridEngine:
             if not legal_moves:
                 raise ValueError("No legal moves available!")
             best_move = legal_moves[0]
+        
+        # Enhanced repetition avoidance with cycle detection
         if best_move and abs(best_value) < 4.0:
             board.push(best_move)
             is_rep_2 = board.is_repetition(2)
             is_rep_1 = board.is_repetition(1)
             board.pop()
-            if is_rep_2 or (is_rep_1 and abs(best_value) < 2.5):
+            
+            # Check for move cycles using our history tracker
+            is_creating_cycle = self._is_move_creating_cycle(board, best_move, lookback=12)
+            
+            if is_rep_2 or is_creating_cycle or (is_rep_1 and abs(best_value) < 2.5):
                 legal_moves_list = list(board.legal_moves)
                 found_alternative = False
-                for alt_move in legal_moves_list[:15]:
+                
+                # Try to find a move that doesn't create repetition or cycles
+                for alt_move in legal_moves_list:
                     if alt_move == best_move:
                         continue
+                    
                     board.push(alt_move)
                     alt_is_rep_2 = board.is_repetition(2)
                     alt_is_rep_1 = board.is_repetition(1)
                     board.pop()
-                    if not alt_is_rep_2 and not alt_is_rep_1:
+                    
+                    alt_is_cycle = self._is_move_creating_cycle(board, alt_move, lookback=12)
+                    
+                    # Prefer moves that don't create any repetition or cycles
+                    if not alt_is_rep_2 and not alt_is_cycle and not alt_is_rep_1:
                         old_move = best_move
                         best_move = alt_move
                         found_alternative = True
                         if self.verbose:
-                            print(f"AVOIDING REPETITION: {board.san(old_move)} → {board.san(alt_move)}")
+                            print(f"AVOIDING REPETITION/CYCLE: {board.san(old_move)} → {board.san(alt_move)}")
                         break
+                
+                # If we still haven't found a good alternative, at least avoid twofold repetition
                 if not found_alternative and is_rep_2:
-                    for alt_move in legal_moves_list[:15]:
+                    for alt_move in legal_moves_list:
                         if alt_move == best_move:
                             continue
                         board.push(alt_move)
                         alt_is_rep_2 = board.is_repetition(2)
                         board.pop()
                         if not alt_is_rep_2:
+                            old_move = best_move
                             best_move = alt_move
                             if self.verbose:
-                                print(f"AVOIDING THREEFOLD: {board.san(best_move)} → {board.san(alt_move)}")
+                                print(f"AVOIDING THREEFOLD: {board.san(old_move)} → {board.san(alt_move)}")
                             break
         legal_moves_list = list(board.legal_moves)
         if not legal_moves_list:

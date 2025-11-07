@@ -11,11 +11,13 @@ def play(interface: Interface, color="w"):
         model_path = os.path.join(os.path.dirname(__file__), "model_weights.pth")
         if os.path.exists(model_path):
             evaluator = NeuralEvaluator(model_path=model_path)
-            engine = HybridEngine(neural_evaluator=evaluator, use_opening_book=True, search_depth=5)
+            # Increased depth for better tactical awareness
+            engine = HybridEngine(neural_evaluator=evaluator, use_opening_book=True, search_depth=7)
         else:
-            engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=6)
+            # Even higher depth when no neural network to compensate
+            engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=8)
     except:
-        engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=6)
+        engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=8)
     total_budget = 280.0
     time_remaining = total_budget
     while not board.is_game_over():
