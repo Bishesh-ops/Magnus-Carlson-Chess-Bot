@@ -501,20 +501,75 @@ class HybridEngine:
         ordered = sorted(moves, key=move_score, reverse=True)
         return ordered
     def _see(self, board: chess.Board, move: chess.Move) -> int:
-        """Simple Static Exchange Evaluation for captures. Returns net gain in centipawns for side to move."""
+        """Static Exchange Evaluation for captures. Returns net gain in centipawns for side to move."""
         if not board.is_capture(move):
             return 0
+
         to_sq = move.to_square
         from_sq = move.from_square
-        side = board.turn
+        
+        # Initial capture value
         victim = board.piece_at(to_sq)
+        if victim:
+            value = PIECE_VALUES[victim.piece_type]
+        else: # En-passant
+            value = PIECE_VALUES[chess.PAWN]
+
         attacker = board.piece_at(from_sq)
-        if victim is None or attacker is None:
+        if not attacker:
+             return 0 # Should not happen
+
+        # Simulate the capture
+        board.push(move)
+        
+        # Recursively calculate SEE from the opponent's perspective
+        value -= self._see_recursive(board, to_sq, -1)
+        
+        board.pop()
+        
+        return value
+
+    def _see_recursive(self, board: chess.Board, to_sq: chess.Square, sign: int) -> int:
+        """Helper for SEE that finds the best response for the current side."""
+        side = board.turn
+        
+        # Find the least valuable attacker
+        attackers = board.attackers(not side, to_sq)
+        if not attackers:
             return 0
-        gain = []
-        occ = set(sq for sq in chess.SQUARES if board.piece_at(sq))
-        attackers_white = {sq for sq in chess.SQUARES if board.piece_at(sq) and board.piece_at(sq).color == chess.WHITE and board.is_attacked_by(chess.WHITE, to_sq)}
-        return PIECE_VALUES[victim.piece_type] - PIECE_VALUES[attacker.piece_type]
+
+        best_attacker_sq = -1
+        min_attacker_value = float('inf')
+
+        for attacker_sq in attackers:
+            attacker_piece = board.piece_at(attacker_sq)
+            if attacker_piece:
+                attacker_value = PIECE_VALUES[attacker_piece.piece_type]
+                if attacker_value < min_attacker_value:
+                    min_attacker_value = attacker_value
+                    best_attacker_sq = attacker_sq
+        
+        if best_attacker_sq == -1:
+            return 0
+
+        # Make the capture with the least valuable piece
+        move = chess.Move(best_attacker_sq, to_sq)
+        
+        # The value of the piece being captured now
+        captured_piece = board.piece_at(to_sq)
+        if not captured_piece:
+             return 0 # Should not happen
+        value = PIECE_VALUES[captured_piece.piece_type]
+
+        board.push(move)
+        
+        # After this capture, the opponent will recapture.
+        # The value is from our perspective, so we subtract the opponent's gain.
+        value -= self._see_recursive(board, to_sq, -sign)
+        
+        board.pop()
+        
+        return value
     def _has_non_pawn_material(self, board: chess.Board, color: bool) -> bool:
         """Return True if the side has any non-pawn material (to avoid zugzwang issues)."""
         for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
