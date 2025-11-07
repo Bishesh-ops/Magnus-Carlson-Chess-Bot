@@ -433,13 +433,13 @@ class HybridEngine:
         phase = self._phase(board)
         if neural_val is not None:
             if phase < 0.25:
-                val = 0.50 * material_only + 0.35 * classical + 0.15 * neural_val
+                val = 0.25 * material_only + 0.60 * classical + 0.15 * neural_val
             elif phase < 0.65:
-                val = 0.55 * material_only + 0.30 * classical + 0.15 * neural_val
+                val = 0.30 * material_only + 0.55 * classical + 0.15 * neural_val
             else:
-                val = 0.60 * material_only + 0.25 * classical + 0.15 * neural_val
+                val = 0.40 * material_only + 0.45 * classical + 0.15 * neural_val
         else:
-            val = 0.75 * material_only + 0.25 * classical
+            val = 0.50 * material_only + 0.50 * classical
         self.eval_cache[key] = val
         return val
     def _order_moves(self, board: chess.Board, moves: List[chess.Move], depth: int = 0) -> List[chess.Move]:
