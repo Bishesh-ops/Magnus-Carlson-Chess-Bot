@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from .neural_evaluator import NeuralEvaluator
 
 
-# Traditional piece values for fallback evaluation
+# Optimized piece values (based on modern engine standards)
 PIECE_VALUES = {
     chess.PAWN: 100,
     chess.KNIGHT: 320,
-    chess.BISHOP: 330,
+    chess.BISHOP: 335,     # Bishop slightly > Knight (pair bonus implicit)
     chess.ROOK: 500,
     chess.QUEEN: 900,
     chess.KING: 20000
@@ -562,54 +562,59 @@ class HybridEngine:
         def move_score(move):
             score = 0
 
-            # TT move gets highest priority
+            # TT move gets highest priority (proven best from previous search)
             if tt_move is not None and move == tt_move:
                 score += 100000
 
-            # Killer moves (only for non-captures)
+            # Killer moves (only for non-captures) - quiet moves that caused cutoffs
             if move in killers and not board.is_capture(move):
                 # Newer killer gets slightly higher score
                 score += 50000 - (killers.index(move) * 100)
             
-            # Prioritize captures using MVV-LVA and SEE
+            # CAPTURES: Highest tactical priority after TT move
             if board.is_capture(move):
                 captured = board.piece_at(move.to_square)
                 attacker = board.piece_at(move.from_square)
                 if captured and attacker:
                     # HEAVILY prioritize capturing valuable pieces
-                    # Queen capture = 90k bonus, Rook = 50k, etc.
+                    # Queen capture = 90k, Rook = 50k, Bishop/Knight = 32-33k, Pawn = 10k
                     capture_bonus = 100 * PIECE_VALUES[captured.piece_type]
-                    # Prefer capturing with less valuable pieces (MVV-LVA)
+                    # MVV-LVA: Prefer capturing with less valuable pieces
                     score += capture_bonus - PIECE_VALUES[attacker.piece_type]
-                # Static Exchange Evaluation bonus/penalty
+                
+                # Static Exchange Evaluation: favor winning captures
                 see_gain = self._see(board, move)
-                score += 2000 if see_gain > 0 else (-1000 if see_gain < 0 else 0)
+                score += 3000 if see_gain > 0 else (-1500 if see_gain < 0 else 0)
             
-            # Prioritize checks
+            # CHECKS: High tactical value
             board.push(move)
             if board.is_check():
-                score += 5000
+                score += 7000  # Increased from 5000
             
-            # Aggressively penalize moves that lead to repetition
-            if board.is_repetition(2):  # This would be the 2nd repetition (3rd occurrence)
-                score -= 80000  # MASSIVE penalty to avoid repetition (higher than most bonuses!)
-            elif board.is_repetition(1):  # First repetition (2nd occurrence)
-                score -= 25000  # Heavy penalty even for first repetition
+            # REPETITION: MASSIVE penalties to avoid draws
+            if board.is_repetition(2):  # Would be 3rd repetition (draw!)
+                score -= 100000  # CRITICAL: Higher than TT bonus to always avoid!
+            elif board.is_repetition(1):  # First repetition
+                score -= 30000  # Heavy penalty to discourage pattern
             
             board.pop()
             
-            # History heuristic
+            # History heuristic: moves that worked well before (up to ±10k range)
             move_key = (move.from_square, move.to_square)
             score += self.history_table.get(move_key, 0)
-            # Butterfly history
+            
+            # Butterfly history: piece-type specific patterns
             mover = board.piece_at(move.from_square)
             if mover is not None:
                 bkey = (mover.color, mover.piece_type, move.to_square)
                 score += self.butterfly_history.get(bkey, 0)
             
-            # Prioritize promotions
+            # PROMOTIONS: Always valuable
             if move.promotion:
-                score += 8000
+                if move.promotion == chess.QUEEN:
+                    score += 12000  # Queen promotion is huge
+                else:
+                    score += 8000  # Underpromotions still good
             
             return score
         
@@ -932,18 +937,18 @@ class HybridEngine:
                 
                 # Aggressively penalize moves that lead to repetition (unless we're losing badly)
                 if board.is_repetition(2):  # Will be 3rd repetition if opponent repeats
-                    # MUCH LARGER penalty - equivalent to losing 3-4 pawns
-                    repetition_penalty = 3.5
+                    # HUGE penalty - equivalent to losing 4-5 pawns
+                    repetition_penalty = 4.5
                     # Only avoid repetition if we're not significantly losing
-                    if abs(move_value) < 3.0:  # Broader threshold
+                    if abs(move_value) < 3.5:  # Broader threshold
                         if board.turn == chess.WHITE:  # We just played Black
                             move_value -= repetition_penalty  # Make it less attractive for Black
                         else:  # We just played White
                             move_value += repetition_penalty  # Make it less attractive for White
                 elif board.is_repetition(1):  # First repetition
-                    # Moderate penalty even for first repetition
-                    repetition_penalty = 1.5
-                    if abs(move_value) < 2.0:
+                    # Solid penalty even for first repetition
+                    repetition_penalty = 2.0
+                    if abs(move_value) < 2.5:
                         if board.turn == chess.WHITE:
                             move_value -= repetition_penalty
                         else:
