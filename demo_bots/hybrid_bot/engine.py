@@ -375,12 +375,32 @@ class HybridEngine:
 
     def _king_safety(self, board: chess.Board) -> float:
         score = 0
+        phase = self._phase(board)
+        
         for color in (chess.WHITE, chess.BLACK):
             king_sq = board.king(color)
             if king_sq is None:
                 continue
+            
             rank = king_sq // 8
             file = king_sq % 8
+            starting_rank = 0 if color == chess.WHITE else 7
+            
+            # CRITICAL: Heavily penalize king moves in opening/middlegame
+            if phase < 0.5:  # Not endgame
+                # King should stay on back rank (rank 0 for white, 7 for black)
+                if rank != starting_rank:
+                    # King moved forward - VERY BAD in opening!
+                    penalty = 0.8 * (1.0 - phase)  # Up to 0.8 pawns penalty
+                    score += (-penalty if color == chess.WHITE else penalty)
+                
+                # King moved from center files (e/d/c/f) is especially bad
+                if file < 2 or file > 5:  # King on a,b,g,h files
+                    if rank != starting_rank:
+                        penalty = 0.5 * (1.0 - phase)
+                        score += (-penalty if color == chess.WHITE else penalty)
+            
+            # Pawn shield evaluation
             shield_files = [file + df for df in (-1,0,1) if 0 <= file+df < 8]
             shield_rank = rank + (1 if color == chess.WHITE else -1)
             missing = 0
@@ -390,28 +410,53 @@ class HybridEngine:
                     p = board.piece_at(sq)
                     if not (p and p.piece_type == chess.PAWN and p.color == color):
                         missing += 1
-            penalty = missing * 0.10
+            
+            # Increased pawn shield penalty
+            penalty = missing * 0.25 * (1.0 - phase * 0.5)  # Less important in endgame
+            
             # Open file danger: enemy rooks/queens attacking king square
             if board.is_attacked_by(not color, king_sq):
-                penalty += 0.15
+                penalty += 0.35 * (1.0 - phase * 0.5)
+            
             score += (-penalty if color == chess.WHITE else penalty)
+        
         return score
 
     def _piece_activity(self, board: chess.Board) -> float:
         score = 0
         center = {chess.D4, chess.D5, chess.E4, chess.E5}
+        phase = self._phase(board)
+        
         for color in (chess.WHITE, chess.BLACK):
             sign = 1 if color == chess.WHITE else -1
-            # Knights in center
+            starting_rank = 0 if color == chess.WHITE else 7
+            
+            # DEVELOPMENT BONUS in opening (phase < 0.3)
+            if phase < 0.3:
+                # Count developed minor pieces (off back rank)
+                knights_developed = sum(1 for sq in board.pieces(chess.KNIGHT, color) if sq // 8 != starting_rank)
+                bishops_developed = sum(1 for sq in board.pieces(chess.BISHOP, color) if sq // 8 != starting_rank)
+                
+                # Big bonus for developing pieces early
+                score += 0.15 * knights_developed * sign
+                score += 0.15 * bishops_developed * sign
+            
+            # Knights in center - very strong
             for sq in board.pieces(chess.KNIGHT, color):
                 if sq in center:
+                    score += 0.20 * sign  # Increased from 0.10
+                # Bonus for knights on 3rd/6th rank (advanced but not too far)
+                rank = sq // 8
+                if (color == chess.WHITE and rank == 2) or (color == chess.BLACK and rank == 5):
                     score += 0.10 * sign
-            # Bishops on long diagonals (rough: corners attack squares) -> reward if on c1/f1/c8/f8 or central diagonals
+            
+            # Bishops - active diagonals
             for sq in board.pieces(chess.BISHOP, color):
                 file = sq % 8
                 rank = sq // 8
-                if file in (2,5) or rank in (2,5):
-                    score += 0.06 * sign
+                # Long diagonals and central positions
+                if file in (2,3,4,5) and rank in (2,3,4,5):
+                    score += 0.10 * sign  # Increased from 0.06
             # Rooks on open/semi-open files
             for sq in board.pieces(chess.ROOK, color):
                 file = sq % 8
@@ -598,6 +643,29 @@ class HybridEngine:
                 score -= 30000  # Heavy penalty to discourage pattern
             
             board.pop()
+            
+            # PENALIZE EARLY KING MOVES (unless castling)
+            piece = board.piece_at(move.from_square)
+            if piece and piece.piece_type == chess.KING:
+                # Castling is good!
+                if abs(move.from_square - move.to_square) == 2:  # Castling move
+                    score += 8000
+                else:
+                    # Regular king move in opening/middlegame is BAD
+                    if board.fullmove_number < 15:  # Opening
+                        score -= 20000  # Heavy penalty for moving king early
+                    elif board.fullmove_number < 30:  # Middlegame
+                        score -= 10000  # Moderate penalty
+            
+            # BONUS for developing minor pieces in opening
+            if piece and board.fullmove_number < 12:
+                starting_rank = 0 if piece.color == chess.WHITE else 7
+                if piece.piece_type in (chess.KNIGHT, chess.BISHOP):
+                    from_rank = move.from_square // 8
+                    to_rank = move.to_square // 8
+                    # Moving off back rank = development
+                    if from_rank == starting_rank and to_rank != starting_rank:
+                        score += 5000  # Good development move
             
             # History heuristic: moves that worked well before (up to ±10k range)
             move_key = (move.from_square, move.to_square)
