@@ -3,7 +3,6 @@ from .play import play
 from .train import train
 import argparse
 from .interface import TestInterface, CompetitionInterface
-
 def main():
     if len(sys.argv) < 2:
         raise ValueError("Usage: python -m hybrid_bot [play|train|test] [w|b]")
@@ -12,7 +11,6 @@ def main():
         color = sys.argv[2] if len(sys.argv) > 2 else "w"
         play(CompetitionInterface(), color=color)
     elif cmd == "train":
-        # Parse optional training args here to avoid requiring direct script call
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--epochs", type=int, default=12)
         parser.add_argument("--batch-size", type=int, default=256)
@@ -33,6 +31,5 @@ def main():
         play(TestInterface(), color=color)
     else:
         raise ValueError("Invalid argument received - 'play' or 'train' expected")
-
 if __name__ == "__main__":
     main()
