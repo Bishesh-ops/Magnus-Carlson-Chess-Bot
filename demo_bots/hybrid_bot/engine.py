@@ -151,14 +151,14 @@ class TTEntry:
 class HybridEngine:
     
     def __init__(self, neural_evaluator: Optional[NeuralEvaluator] = None, 
-                 use_opening_book=True, search_depth=4, verbose=False):
+                 use_opening_book=True, search_depth=5, verbose=False):
         self.evaluator = neural_evaluator
         self.use_neural = neural_evaluator is not None
         
         # Opening book
         self.opening_book = OpeningBook() if use_opening_book else None
         
-        # Search parameters
+        # Search parameters - increased base depth for more thorough analysis
         self.base_depth = search_depth
         self.max_time = 280  # Leave buffer in 300 second limit
         self.nodes_searched = 0
@@ -578,20 +578,23 @@ class HybridEngine:
                 neural_val = None
         phase = self._phase(board)
         if neural_val is not None:
-            # Hybrid blending: Emphasize material more + neural for tactics
-            # Material gets 40% weight always to ensure we capture pieces
+            # NEW: Classical minimax gets MAJORITY weight, neural is advisory
+            # This ensures the bot ALWAYS considers all tactical possibilities
             if phase < 0.25:
-                # Opening: 40% material, 35% neural, 25% classical
-                val = 0.40 * material_only + 0.35 * neural_val + 0.25 * classical
+                # Opening: 50% material, 35% classical, 15% neural
+                # Classical dominates to ensure proper piece development
+                val = 0.50 * material_only + 0.35 * classical + 0.15 * neural_val
             elif phase < 0.65:
-                # Middlegame: 40% material, 45% neural, 15% classical
-                val = 0.40 * material_only + 0.45 * neural_val + 0.15 * classical
+                # Middlegame: 55% material, 30% classical, 15% neural
+                # Material + classical dominate for concrete tactics
+                val = 0.55 * material_only + 0.30 * classical + 0.15 * neural_val
             else:
-                # Endgame: 50% material, 30% neural, 20% classical
-                val = 0.50 * material_only + 0.30 * neural_val + 0.20 * classical
+                # Endgame: 60% material, 25% classical, 15% neural
+                # Material is king in endgames
+                val = 0.60 * material_only + 0.25 * classical + 0.15 * neural_val
         else:
             # No neural net: emphasize material even more
-            val = 0.70 * material_only + 0.30 * classical
+            val = 0.75 * material_only + 0.25 * classical
         self.eval_cache[key] = val
         return val
     

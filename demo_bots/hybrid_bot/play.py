@@ -11,17 +11,20 @@ from .engine import HybridEngine
 def play(interface: Interface, color="w"):
     board = chess.Board()
 
-    # Engine init
+    # Engine init - Increased depths for better move analysis
     try:
         from .neural_evaluator import NeuralEvaluator
         model_path = os.path.join(os.path.dirname(__file__), "model_weights.pth")
         if os.path.exists(model_path):
             evaluator = NeuralEvaluator(model_path=model_path)
-            engine = HybridEngine(neural_evaluator=evaluator, use_opening_book=True, search_depth=4)
+            # With neural: depth 5 (neural helps prune)
+            engine = HybridEngine(neural_evaluator=evaluator, use_opening_book=True, search_depth=5)
         else:
-            engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=5)
+            # Without neural: depth 6 (classical only, needs more depth)
+            engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=6)
     except:
-        engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=5)
+        # Fallback: depth 6 for pure classical
+        engine = HybridEngine(neural_evaluator=None, use_opening_book=True, search_depth=6)
 
     total_budget = 280.0
     time_remaining = total_budget
