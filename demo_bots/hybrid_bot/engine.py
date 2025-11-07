@@ -590,9 +590,11 @@ class HybridEngine:
             if board.is_check():
                 score += 5000
             
-            # Penalize moves that lead to repetition
+            # Aggressively penalize moves that lead to repetition
             if board.is_repetition(2):  # This would be the 2nd repetition (3rd occurrence)
-                score -= 15000  # Significant penalty to avoid repetition
+                score -= 80000  # MASSIVE penalty to avoid repetition (higher than most bonuses!)
+            elif board.is_repetition(1):  # First repetition (2nd occurrence)
+                score -= 25000  # Heavy penalty even for first repetition
             
             board.pop()
             
@@ -928,15 +930,24 @@ class HybridEngine:
                     # We're maximizing (White)
                     move_value = self._alpha_beta(board, current_depth - 1, alpha, beta, False)
                 
-                # Penalize moves that lead to repetition (unless we're losing badly)
+                # Aggressively penalize moves that lead to repetition (unless we're losing badly)
                 if board.is_repetition(2):  # Will be 3rd repetition if opponent repeats
-                    repetition_penalty = 0.15  # About 1.5 pawns penalty
-                    # Only avoid repetition if we're not significantly worse
-                    if abs(move_value) < 2.0:  # If position is roughly equal or slightly worse
+                    # MUCH LARGER penalty - equivalent to losing 3-4 pawns
+                    repetition_penalty = 3.5
+                    # Only avoid repetition if we're not significantly losing
+                    if abs(move_value) < 3.0:  # Broader threshold
                         if board.turn == chess.WHITE:  # We just played Black
                             move_value -= repetition_penalty  # Make it less attractive for Black
                         else:  # We just played White
                             move_value += repetition_penalty  # Make it less attractive for White
+                elif board.is_repetition(1):  # First repetition
+                    # Moderate penalty even for first repetition
+                    repetition_penalty = 1.5
+                    if abs(move_value) < 2.0:
+                        if board.turn == chess.WHITE:
+                            move_value -= repetition_penalty
+                        else:
+                            move_value += repetition_penalty
                 
                 board.pop()
                 
@@ -1035,28 +1046,50 @@ class HybridEngine:
                 raise ValueError("No legal moves available!")
             best_move = legal_moves[0]
         
-        # Final check: If best move leads to repetition and we have alternatives, try to avoid it
-        # Only if we're not in a desperate situation (losing badly)
-        if best_move and abs(best_value) < 2.0:  # Position is roughly equal
+        # Final check: AGGRESSIVELY avoid repetition unless truly desperate
+        if best_move and abs(best_value) < 4.0:  # Broader threshold - even if slightly losing
             board.push(best_move)
-            is_repetition = board.is_repetition(2)
+            is_rep_2 = board.is_repetition(2)  # Would be 3rd occurrence
+            is_rep_1 = board.is_repetition(1)  # Would be 2nd occurrence
             board.pop()
             
-            if is_repetition:
-                # Look for a non-repetitive alternative with similar evaluation
+            # Avoid ANY repetition unless we're very desperate
+            if is_rep_2 or (is_rep_1 and abs(best_value) < 2.5):
+                # Look for NON-repetitive alternative - check MORE moves
                 legal_moves_list = list(board.legal_moves)
-                for alt_move in legal_moves_list[:5]:  # Check top 5 alternatives
+                found_alternative = False
+                
+                for alt_move in legal_moves_list[:15]:  # Check top 15 alternatives (was 5)
                     if alt_move == best_move:
                         continue
                     board.push(alt_move)
-                    alt_is_rep = board.is_repetition(2)
+                    alt_is_rep_2 = board.is_repetition(2)
+                    alt_is_rep_1 = board.is_repetition(1)
                     board.pop()
-                    if not alt_is_rep:
-                        # Found a non-repetitive move, use it instead
+                    
+                    # Prefer moves with NO repetition at all
+                    if not alt_is_rep_2 and not alt_is_rep_1:
+                        # Found a completely fresh move, use it!
+                        old_move = best_move
                         best_move = alt_move
+                        found_alternative = True
                         if self.verbose:
-                            print(f"Avoiding repetition: switched from {board.san(best_move)} to {board.san(alt_move)}")
+                            print(f"AVOIDING REPETITION: {board.san(old_move)} → {board.san(alt_move)}")
                         break
+                
+                # If all moves lead to some repetition, at least avoid the 3rd repetition
+                if not found_alternative and is_rep_2:
+                    for alt_move in legal_moves_list[:15]:
+                        if alt_move == best_move:
+                            continue
+                        board.push(alt_move)
+                        alt_is_rep_2 = board.is_repetition(2)
+                        board.pop()
+                        if not alt_is_rep_2:
+                            best_move = alt_move
+                            if self.verbose:
+                                print(f"AVOIDING THREEFOLD: {board.san(best_move)} → {board.san(alt_move)}")
+                            break
         
         # CRITICAL: Always verify move is legal before returning
         # Create a fresh list of legal moves to be absolutely sure
