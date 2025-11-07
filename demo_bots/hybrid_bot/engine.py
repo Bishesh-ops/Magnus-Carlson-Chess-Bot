@@ -95,9 +95,21 @@ class OpeningBook:
             moves = self.openings[fen_key]
             sorted_moves = sorted(moves, key=lambda x: x[1], reverse=True)
             legal_moves_set = set(board.legal_moves)
+            
+            # Try to find a good opening move that doesn't cause repetition
             for move, win_rate in sorted_moves:
                 if move in legal_moves_set:
-                    return move
+                    # Check if this move would cause repetition
+                    board.push(move)
+                    causes_repetition = board.is_repetition(1)
+                    board.pop()
+                    
+                    # Return first legal move that doesn't repeat
+                    if not causes_repetition:
+                        return move
+            
+            # If all opening moves cause repetition, return None
+            # This will fall back to regular search
         return None
 @dataclass
 class TTEntry:
@@ -892,12 +904,26 @@ class HybridEngine:
         if len(self.recent_moves_history) > self.max_history_length:
             self.recent_moves_history.pop(0)
         
-        if self.opening_book and board.fullmove_number <= 15:
+        # Use opening book only for the first 8 moves to avoid early repetitions
+        if self.opening_book and board.fullmove_number <= 8:
             opening_move = self.opening_book.get_opening_move(board)
             if opening_move:
-                if self.verbose:
-                    print(f"Using opening book move: {board.san(opening_move)}")
-                return opening_move
+                # Check if opening book move would cause repetition
+                board.push(opening_move)
+                would_repeat = board.is_repetition(2) or board.is_repetition(1)
+                board.pop()
+                
+                # Also check if it creates a cycle
+                would_create_cycle = self._is_move_creating_cycle(board, opening_move, lookback=10)
+                
+                # Only use opening book if it doesn't repeat or create cycles
+                if not would_repeat and not would_create_cycle:
+                    if self.verbose:
+                        print(f"Using opening book move: {board.san(opening_move)}")
+                    return opening_move
+                elif self.verbose:
+                    print(f"Skipping opening book move {board.san(opening_move)} - would cause repetition")
+                # If opening book would repeat, fall through to regular search
         self.start_time = time.time()
         if time_limit:
             self.max_time = time_limit
